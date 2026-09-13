@@ -1,24 +1,56 @@
 {
   "name": "extract_analysis",
-  "description": "Batched Cyrano analysis pass: extract commitments, open asks, subtext observations, and next-move suggestions from one rolling window of diarized transcript in a single call. Replaces four concurrent single-purpose calls (commitments/asks/subtext/suggestions — those schemas remain in backend/schemas/ as the portable per-purpose agent tools).",
-  "system_prompt": "You read a short window of a diarized conversation transcript. Lines are labeled USER (the wearer of the device), OTHER (anyone else in the room), UNKNOWN (diarization was not confident), or SYSTEM (audio captured from the device's output — a meeting feed or video — i.e. a non-user counterpart). A SYSTEM line may additionally carry `speaker_slot` (2, 3, …) identifying WHICH distinct voice on the feed said it — a meeting is usually several different people with different agendas, not one. When a line has a speaker_slot, refer to that person as \"Speaker 2\", \"Speaker 3\", etc. in everything you write, and never merge different slots into one voice: Speaker 2 hedging and Speaker 5 hedging are two different facts. Only fall back to \"SYSTEM\" for feed lines that have no slot. In this ONE pass you extract four independent kinds of items. The kinds do not interact: apply each kind's rules on its own, and return an empty array for any kind with no real signal in this window — empty arrays are the common, correct answer.\n\nCOMMITMENTS — things a speaker agreed to do, whoever made the promise: USER committing to an action, or OTHER/SYSTEM committing to something (e.g. \"I'll send you the signed contract by Friday\"). Extract only real agreements — clear, explicit undertakings — not things merely discussed hypothetically or proposed and never agreed to. Conditionals, quoted or imagined speech (\"if I say, I'm going to…\"), hedged possibilities (\"I might\", \"maybe I'll\", \"I'll probably\"), thinking-aloud (\"I'll be thinking about it\"), and habitual or past statements (\"I was going to…\") are NOT commitments — when in doubt, leave it out. Restate each commitment concisely as an action, naming the person and the thing when the conversation makes them clear (e.g. \"Send Chris the update about the call\", not \"Send the update\"); when the committer is a slotted feed voice, name them (\"Speaker 5: dig into the staging environment\"). Set `source_seq` to the line where the commitment was actually made (the committer's line), so ownership can be attributed to the speaker who made it. Do not extract commitments already listed in `known_commitments` (avoid duplicates). If a deadline is stated or strongly implied (\"by Friday\", \"before the trip\"), infer an ISO date relative to `now`; otherwise use null — never guess a date that was not implied. Confidence reflects how explicit the agreement was, not how important it is.\n\nASKS — requests OTHER (or SYSTEM) made of USER: questions, favors, or asks that expect a response or action from USER, that USER has not yet clearly answered or agreed/declined within this window. Do not extract asks already listed in `known_open_asks`. If the transcript shows USER answering or declining an ask within the window, do not extract it (it is resolved, not open). Rhetorical questions, conversational filler (\"right?\", \"you know?\"), and small talk are not asks. Restate each ask concisely; when it is a question, phrase it as a direct question ending with a question mark (e.g. \"Do you have a hard stop?\").\n\nSUBTEXT — speculative reads of tone: hesitation, disagreement being swallowed rather than voiced, or a mismatch between stated enthusiasm and how something is phrased. This is speculative reading of tone from text alone, not a transcript of emotion — you will be wrong sometimes, and that is acceptable as long as it is clearly labeled as speculation. At most 2 subtext items per window, and most windows deserve zero. Filler (\"um\", \"like\", \"you know\"), routine self-correction, and thinking-aloud are just how people talk in meetings — they are NOT hesitation and must never be flagged on their own. Flag hesitation only when the hedging is unusually heavy for that speaker AND attached to something consequential — a decision, a disagreement, a commitment, a risk — and set its confidence honestly: a hesitation read you would not defend belongs at low confidence or, better, not emitted at all. swallowed_disagreement and enthusiasm_mismatch are the valuable reads — when competing with a hesitation for the window's 2 slots, they win. Attribute every observation to the specific voice (\"Speaker 2 may be…\", \"USER may be…\"), never to an undifferentiated SYSTEM when the line carries a slot, and do not re-flag the same speaker's same discomfort about the same topic more than once. Every subtext item is speculation and must never be phrased as established fact. Prefer silence over a weak read.\n\nSUGGESTIONS — at most 2 next-move suggestions for USER: concrete actions that move toward a real outcome (e.g. \"Confirm the Friday deadline in writing\", not \"Follow up soon\"). Consider the commitments and asks you extracted above plus `known_commitments` and `known_open_asks`. Every suggestion must name the outcome it serves. When a suggestion follows from a commitment or ask, carry its specifics — name the person and the thing (e.g. \"Add the Chris update to the call notes\"), never a generic \"follow up\". Do not suggest anything USER already did in this window. Do not pad the list to reach 2 — if there is one good suggestion, return one; if there is none, return an empty array. Suggestions are always dismissible, never phrased as instructions the user must follow.\n\nDECISIONS — concrete outcomes the group actually SETTLED in this window: a chosen course of action, an agreed convention, a resolved question, or an assignment the room converged on (e.g. \"Sully will explore the staging environment and report back\", \"Announce test launches in the bugs channel\", \"File a ticket for the quarterly integration audit\"). A decision is distinct from a COMMITMENT (one person's promise) and a SUGGESTION (advice to USER): it is what the conversation RESOLVED, whoever it binds. Extract only outcomes actually reached or clearly converged on — not options still under debate, not one person musing. Restate each as the outcome, naming who owns it when the transcript makes it clear (\"Speaker 5: dig into staging and report back\"). Set source_seq to the line where it was settled, so ownership is attributed to that speaker. Set status to \"decided\" for a firm agreement, or \"tentative\" for a leaning the room favored but did not lock. Most windows settle nothing — an empty array is the common, correct answer; never inflate a discussion into a decision.\n\n`user_context`, when present, is reference material the USER deliberately attached mid-conversation (clipboard text, an OCR'd app-window snapshot, or a picked image). It is not conversation: it has no speaker and no seq, must never be treated as a transcript line or attributed to anyone, and must never be extracted from on its own. Use it only to enrich or disambiguate items grounded in actual transcript lines — e.g. resolving 'this ticket' to the ticket's title. `source_seq` always references a transcript line.",
+  "description": "Batched Cyrano analysis pass: extract commitments, open asks, subtext observations, next-move suggestions, and decisions from one rolling window of diarized transcript in a single call. Replaces four concurrent single-purpose calls (commitments/asks/subtext/suggestions — those schemas remain in backend/schemas/ as the portable per-purpose agent tools).",
+  "system_prompt": "You read a short window of a diarized conversation transcript. Lines are labeled USER (the wearer of the device), OTHER (anyone else in the room), UNKNOWN (diarization was not confident), or SYSTEM (audio captured from the device's output — a meeting feed or video — i.e. a non-user counterpart). A SYSTEM line may additionally carry `speaker_slot` (2, 3, …) identifying WHICH distinct voice on the feed said it — a meeting is usually several different people with different agendas, not one. When a line has a speaker_slot, refer to that person as \"Speaker 2\", \"Speaker 3\", etc. in everything you write, and never merge different slots into one voice: Speaker 2 hedging and Speaker 5 hedging are two different facts. Only fall back to \"SYSTEM\" for feed lines that have no slot. In this ONE pass you extract five independent kinds of items. The kinds do not interact: apply each kind's rules on its own, and return an empty array for any kind with no real signal in this window — empty arrays are the common, correct answer.\n\nCOMMITMENTS — things a speaker agreed to do, whoever made the promise: USER committing to an action, or OTHER/SYSTEM committing to something (e.g. \"I'll send you the signed contract by Friday\"). Extract only real agreements — clear, explicit undertakings — not things merely discussed hypothetically or proposed and never agreed to. Conditionals, quoted or imagined speech (\"if I say, I'm going to…\"), hedged possibilities (\"I might\", \"maybe I'll\", \"I'll probably\"), thinking-aloud (\"I'll be thinking about it\"), and habitual or past statements (\"I was going to…\") are NOT commitments — when in doubt, leave it out. Restate each commitment concisely as an action, naming the person and the thing when the conversation makes them clear (e.g. \"Send Chris the update about the call\", not \"Send the update\"); when the committer is a slotted feed voice, name them (\"Speaker 5: dig into the staging environment\"). Set `source_seq` to the line where the commitment was actually made (the committer's line), so ownership can be attributed to the speaker who made it. Do not extract commitments already listed in `known_commitments` (avoid duplicates). If a deadline is stated or strongly implied (\"by Friday\", \"before the trip\"), infer an ISO date relative to `now`; otherwise use null — never guess a date that was not implied. Confidence reflects how explicit the agreement was, not how important it is.\n\nASKS — requests OTHER (or SYSTEM) made of USER: questions, favors, or asks that expect a response or action from USER, that USER has not yet clearly answered or agreed/declined within this window. Do not extract asks already listed in `known_open_asks`. If the transcript shows USER answering or declining an ask within the window, do not extract it (it is resolved, not open). Rhetorical questions, conversational filler (\"right?\", \"you know?\"), and small talk are not asks. Restate each ask concisely; when it is a question, phrase it as a direct question ending with a question mark (e.g. \"Do you have a hard stop?\").\n\nSUBTEXT — speculative reads of tone: hesitation, disagreement being swallowed rather than voiced, or a mismatch between stated enthusiasm and how something is phrased. This is speculative reading of tone from text alone, not a transcript of emotion — you will be wrong sometimes, and that is acceptable as long as it is clearly labeled as speculation. At most 2 subtext items per window, and most windows deserve zero. Filler (\"um\", \"like\", \"you know\"), routine self-correction, and thinking-aloud are just how people talk in meetings — they are NOT hesitation and must never be flagged on their own. Flag hesitation only when the hedging is unusually heavy for that speaker AND attached to something consequential — a decision, a disagreement, a commitment, a risk — and set its confidence honestly: a hesitation read you would not defend belongs at low confidence or, better, not emitted at all. swallowed_disagreement and enthusiasm_mismatch are the valuable reads — when competing with a hesitation for the window's 2 slots, they win. Attribute every observation to the specific voice by naming that speaker and phrasing it as a hedge about them, never to an undifferentiated SYSTEM when the line carries a slot, and do not re-flag the same speaker's same discomfort about the same topic more than once. Every subtext item is speculation and must never be phrased as established fact. Prefer silence over a weak read.\n\nSUGGESTIONS — at most 2 next-move suggestions for USER: concrete actions that move toward a real outcome (e.g. \"Confirm the Friday deadline in writing\", not \"Follow up soon\"). Consider the commitments and asks you extracted above plus `known_commitments` and `known_open_asks`. Every suggestion must name the outcome it serves. When a suggestion follows from a commitment or ask, carry its specifics — name the person and the thing (e.g. \"Add the Chris update to the call notes\"), never a generic \"follow up\". Do not suggest anything USER already did in this window. Do not pad the list to reach 2 — if there is one good suggestion, return one; if there is none, return an empty array. Suggestions are always dismissible, never phrased as instructions the user must follow.\n\nDECISIONS — concrete outcomes the group actually SETTLED in this window: a chosen course of action, an agreed convention, a resolved question, or an assignment the room converged on (e.g. \"Sully will explore the staging environment and report back\", \"Announce test launches in the bugs channel\", \"File a ticket for the quarterly integration audit\"). A decision is distinct from a COMMITMENT (one person's promise) and a SUGGESTION (advice to USER): it is what the conversation RESOLVED, whoever it binds. Extract only outcomes actually reached or clearly converged on — not options still under debate, not one person musing. Restate each as the outcome, naming who owns it when the transcript makes it clear (\"Speaker 5: dig into staging and report back\"). Set source_seq to the line where it was settled, so ownership is attributed to that speaker. Set status to \"decided\" for a firm agreement, or \"tentative\" for a leaning the room favored but did not lock. Most windows settle nothing — an empty array is the common, correct answer; never inflate a discussion into a decision.\n\n`user_context`, when present, is reference material the USER deliberately attached mid-conversation (clipboard text, an OCR'd app-window snapshot, or a picked image). It is not conversation: it has no speaker and no seq, must never be treated as a transcript line or attributed to anyone, and must never be extracted from on its own. Use it only to enrich or disambiguate items grounded in actual transcript lines — e.g. resolving 'this ticket' to the ticket's title. `source_seq` always references a transcript line.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "now": { "type": "string", "format": "date-time" },
-      "known_commitments": { "type": "array", "items": { "type": "string" } },
-      "known_open_asks": { "type": "array", "items": { "type": "string" } },
+      "now": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "known_commitments": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "known_open_asks": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
       "transcript_window": {
         "type": "array",
         "items": {
           "type": "object",
           "properties": {
-            "seq": { "type": "integer" },
-            "speaker": { "type": "string", "enum": ["USER", "OTHER", "UNKNOWN", "SYSTEM"] },
-            "text": { "type": "string" },
-            "speaker_slot": { "type": "integer", "description": "Which distinct SYSTEM-feed voice said this line (2, 3, …). Absent on mic lines and on clients that predate diarized slots." }
+            "seq": {
+              "type": "integer"
+            },
+            "speaker": {
+              "type": "string",
+              "enum": [
+                "USER",
+                "OTHER",
+                "UNKNOWN",
+                "SYSTEM"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "speaker_slot": {
+              "type": "integer",
+              "description": "Which distinct SYSTEM-feed voice said this line (2, 3, …). Absent on mic lines and on clients that predate diarized slots."
+            }
           },
-          "required": ["seq", "speaker", "text"]
+          "required": [
+            "seq",
+            "speaker",
+            "text"
+          ]
         }
       },
       "user_context": {
@@ -27,17 +59,40 @@
         "items": {
           "type": "object",
           "properties": {
-            "source": { "type": "string", "enum": ["clipboard", "window", "file"] },
-            "app_name": { "type": "string" },
-            "window_title": { "type": "string" },
-            "file_name": { "type": "string" },
-            "text": { "type": "string" }
+            "source": {
+              "type": "string",
+              "enum": [
+                "clipboard",
+                "window",
+                "file"
+              ]
+            },
+            "app_name": {
+              "type": "string"
+            },
+            "window_title": {
+              "type": "string"
+            },
+            "file_name": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
           },
-          "required": ["source", "text"]
+          "required": [
+            "source",
+            "text"
+          ]
         }
       }
     },
-    "required": ["now", "known_commitments", "known_open_asks", "transcript_window"]
+    "required": [
+      "now",
+      "known_commitments",
+      "known_open_asks",
+      "transcript_window"
+    ]
   },
   "output_schema": {
     "type": "object",
@@ -47,13 +102,43 @@
         "items": {
           "type": "object",
           "properties": {
-            "text": { "type": "string", "description": "The commitment, restated concisely in third person, e.g. \"Send the deck to Priya\"." },
-            "owner": { "type": "string", "enum": ["USER", "OTHER", "SYSTEM"], "description": "Who made the commitment. The server re-derives this — and a numeric owner_slot naming the specific SYSTEM-feed voice — from source_seq's speaker, so a best-effort value here is fine and owner_slot is never sent by you." },
-            "inferred_deadline": { "type": ["string", "null"], "description": "ISO date, or null if no deadline was implied." },
-            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-            "source_seq": { "type": "integer", "description": "seq of the line where the commitment was made (the committer's line)." }
+            "text": {
+              "type": "string",
+              "description": "The commitment, restated concisely in third person, e.g. \"Send the deck to Priya\"."
+            },
+            "owner": {
+              "type": "string",
+              "enum": [
+                "USER",
+                "OTHER",
+                "SYSTEM"
+              ],
+              "description": "Who made the commitment. The server re-derives this — and a numeric owner_slot naming the specific SYSTEM-feed voice — from source_seq's speaker, so a best-effort value here is fine and owner_slot is never sent by you."
+            },
+            "inferred_deadline": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "ISO date, or null if no deadline was implied."
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "source_seq": {
+              "type": "integer",
+              "description": "seq of the line where the commitment was made (the committer's line)."
+            }
           },
-          "required": ["text", "owner", "inferred_deadline", "confidence", "source_seq"]
+          "required": [
+            "text",
+            "owner",
+            "inferred_deadline",
+            "confidence",
+            "source_seq"
+          ]
         }
       },
       "asks": {
@@ -61,13 +146,38 @@
         "items": {
           "type": "object",
           "properties": {
-            "text": { "type": "string", "description": "The ask, restated concisely, e.g. \"Can you review the PR before EOD\"." },
-            "requested_by": { "type": "string", "enum": ["OTHER"] },
-            "answered": { "type": "boolean", "enum": [false] },
-            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-            "source_seq": { "type": "integer" }
+            "text": {
+              "type": "string",
+              "description": "The ask, restated concisely, e.g. \"Can you review the PR before EOD\"."
+            },
+            "requested_by": {
+              "type": "string",
+              "enum": [
+                "OTHER"
+              ]
+            },
+            "answered": {
+              "type": "boolean",
+              "enum": [
+                false
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "source_seq": {
+              "type": "integer"
+            }
           },
-          "required": ["text", "requested_by", "answered", "confidence", "source_seq"]
+          "required": [
+            "text",
+            "requested_by",
+            "answered",
+            "confidence",
+            "source_seq"
+          ]
         }
       },
       "subtext": {
@@ -76,13 +186,40 @@
         "items": {
           "type": "object",
           "properties": {
-            "text": { "type": "string", "description": "Phrased as a hedge naming the specific voice, e.g. \"Speaker 2 may be hesitant about the timeline\", never as fact and never an undifferentiated SYSTEM when the source line carries a speaker_slot." },
-            "label": { "type": "string", "enum": ["hesitation", "swallowed_disagreement", "enthusiasm_mismatch"] },
-            "speculation": { "type": "boolean", "enum": [true] },
-            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-            "source_seq": { "type": "integer" }
+            "text": {
+              "type": "string",
+              "description": "Phrased as a hedge naming the specific voice, e.g. \"Speaker 2 may be hesitant about the timeline\", never as fact and never an undifferentiated SYSTEM when the source line carries a speaker_slot."
+            },
+            "label": {
+              "type": "string",
+              "enum": [
+                "hesitation",
+                "swallowed_disagreement",
+                "enthusiasm_mismatch"
+              ]
+            },
+            "speculation": {
+              "type": "boolean",
+              "enum": [
+                true
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "source_seq": {
+              "type": "integer"
+            }
           },
-          "required": ["text", "label", "speculation", "confidence", "source_seq"]
+          "required": [
+            "text",
+            "label",
+            "speculation",
+            "confidence",
+            "source_seq"
+          ]
         }
       },
       "suggestions": {
@@ -91,12 +228,29 @@
         "items": {
           "type": "object",
           "properties": {
-            "text": { "type": "string" },
-            "outcome": { "type": "string", "description": "The concrete outcome this suggestion serves." },
-            "dismissible": { "type": "boolean", "enum": [true] },
-            "source_seq": { "type": "integer" }
+            "text": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string",
+              "description": "The concrete outcome this suggestion serves."
+            },
+            "dismissible": {
+              "type": "boolean",
+              "enum": [
+                true
+              ]
+            },
+            "source_seq": {
+              "type": "integer"
+            }
           },
-          "required": ["text", "outcome", "dismissible", "source_seq"]
+          "required": [
+            "text",
+            "outcome",
+            "dismissible",
+            "source_seq"
+          ]
         }
       },
       "decisions": {
@@ -104,16 +258,53 @@
         "items": {
           "type": "object",
           "properties": {
-            "text": { "type": "string", "description": "The settled outcome, restated concisely, e.g. \"Announce test launches in the bugs channel\"." },
-            "owner": { "type": "string", "enum": ["USER", "OTHER", "SYSTEM"], "description": "Who the decision makes accountable. The server re-derives this (and owner_slot) from source_seq's speaker, so a best-effort value is fine." },
-            "status": { "type": "string", "enum": ["decided", "tentative"], "description": "\"decided\" for a firm agreement, \"tentative\" for a leaning the room favored but did not lock." },
-            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-            "source_seq": { "type": "integer", "description": "seq of the line where the outcome was settled." }
+            "text": {
+              "type": "string",
+              "description": "The settled outcome, restated concisely, e.g. \"Announce test launches in the bugs channel\"."
+            },
+            "owner": {
+              "type": "string",
+              "enum": [
+                "USER",
+                "OTHER",
+                "SYSTEM"
+              ],
+              "description": "Who the decision makes accountable. The server re-derives this (and owner_slot) from source_seq's speaker, so a best-effort value is fine."
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "decided",
+                "tentative"
+              ],
+              "description": "\"decided\" for a firm agreement, \"tentative\" for a leaning the room favored but did not lock."
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "source_seq": {
+              "type": "integer",
+              "description": "seq of the line where the outcome was settled."
+            }
           },
-          "required": ["text", "owner", "status", "confidence", "source_seq"]
+          "required": [
+            "text",
+            "owner",
+            "status",
+            "confidence",
+            "source_seq"
+          ]
         }
       }
     },
-    "required": ["commitments", "asks", "subtext", "suggestions", "decisions"]
+    "required": [
+      "commitments",
+      "asks",
+      "subtext",
+      "suggestions",
+      "decisions"
+    ]
   }
 }
