@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   allowedBundleIds,
   appleSubscriptionId,
+  appleUserLabel,
   evaluateTransaction,
   notificationTransactionIsOurs,
   planForProductId,
@@ -146,9 +147,29 @@ describe("notificationTransactionIsOurs", () => {
   });
 });
 
-describe("appleSubscriptionId", () => {
+describe("appleSubscriptionId / appleUserLabel", () => {
   it("namespaces so Apple and Stripe ids can never collide in one index", () => {
-    expect(appleSubscriptionId("2000000012345")).toBe("apple:2000000012345");
+    expect(appleSubscriptionId("2000000012345", "Production")).toBe("apple:2000000012345");
+    expect(appleUserLabel("2000000012345", "Production")).toBe("apple_2000000012345");
+  });
+
+  it("gives sandbox its own namespace so a tester can never rotate a payer's token", () => {
+    // Both must split, and split the same way: the id keys the subscription
+    // index, the label keys the identity. If only one namespaced, a sandbox
+    // link would write a sandbox subscription onto the production user.
+    expect(appleSubscriptionId("2000000012345", "Sandbox")).toBe("apple:sandbox:2000000012345");
+    expect(appleUserLabel("2000000012345", "Sandbox")).toBe("apple_sandbox_2000000012345");
+    expect(appleSubscriptionId("2000000012345", "Sandbox"))
+      .not.toBe(appleSubscriptionId("2000000012345", "Production"));
+    expect(appleUserLabel("2000000012345", "Sandbox"))
+      .not.toBe(appleUserLabel("2000000012345", "Production"));
+  });
+
+  it("treats anything that is not exactly Sandbox as production", () => {
+    // Fail-safe direction: an unrecognised environment must not invent a third
+    // namespace that nothing else in the system knows how to read.
+    expect(appleSubscriptionId("2000000012345", "")).toBe("apple:2000000012345");
+    expect(appleSubscriptionId("2000000012345", "sandbox")).toBe("apple:2000000012345");
   });
 });
 
@@ -194,6 +215,19 @@ describe("evaluateTransaction", () => {
       { now: NOW, allowedBundleIds: BUNDLES, expectedEnvironment: "Production,Sandbox" },
     );
     expect(out).toMatchObject({ ok: true });
+  });
+
+  it("reports the accepted environment so the identity can be namespaced", () => {
+    // Accepting Sandbox is only safe because this value reaches the registry:
+    // without it the tester and the payer would share one rotating identity.
+    expect(evaluateTransaction(base, { now: NOW, ...PROD }))
+      .toMatchObject({ ok: true, environment: "Production" });
+    expect(
+      evaluateTransaction(
+        { ...base, environment: "Sandbox" },
+        { now: NOW, allowedBundleIds: BUNDLES, expectedEnvironment: "Production,Sandbox" },
+      ),
+    ).toMatchObject({ ok: true, environment: "Sandbox" });
   });
 
   it("rejects a transaction with no environment at all", () => {

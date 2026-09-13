@@ -121,11 +121,56 @@ export interface AppleNotificationPayload {
   };
 }
 
-/** The namespaced subscription id. Shares the registry's existing
- *  `user-subscription:` index with Stripe — the index value is just a label,
- *  and namespacing keeps the two providers from ever colliding. */
-export function appleSubscriptionId(originalTransactionId: string): string {
-  return `apple:${originalTransactionId}`;
+/**
+ * Apple's name for the environment a TestFlight, App Review or sandbox-tester
+ * purchase is stamped with. Production is the only other value Apple sends on
+ * a signed transaction (`Xcode` never reaches us: a local .storekit config
+ * signs with a test certificate the chain walk rejects).
+ */
+export const APPLE_SANDBOX_ENVIRONMENT = "Sandbox";
+
+/** The environments this deployment will accept. Fail-closed: unset accepts
+ *  none, so a deployment must name every environment it intends to honour. */
+export function parseAllowedEnvironments(expectedEnvironment?: string): string[] {
+  return (expectedEnvironment ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+export function isSandboxEnvironment(environment: string | undefined): boolean {
+  return environment === APPLE_SANDBOX_ENVIRONMENT;
+}
+
+/**
+ * The namespaced subscription id. Shares the registry's existing
+ * `user-subscription:` index with Stripe — the index value is just a label,
+ * and namespacing keeps the two providers from ever colliding.
+ *
+ * Sandbox gets its own second namespace, and that is the whole reason
+ * accepting sandbox receipts is safe. Apple stamps every TestFlight purchase
+ * AND every App Review purchase `Sandbox`, so a Production-only deployment
+ * fails its own beta and gets rejected under 2.1 when the reviewer's purchase
+ * unlocks nothing. But sandbox transactions are also free and unlimited to
+ * anyone who can run a build under our App Store Connect record, so they must
+ * never land on the same identity as a paying subscriber's: a sandbox relink
+ * would otherwise rotate a real customer's token, and a sandbox tenant would
+ * be counted as revenue. Separate namespace, separate record, separate row in
+ * the cost report (costs.ts prices `apple-sandbox` at zero).
+ */
+export function appleSubscriptionId(originalTransactionId: string, environment: string): string {
+  return isSandboxEnvironment(environment)
+    ? `apple:sandbox:${originalTransactionId}`
+    : `apple:${originalTransactionId}`;
+}
+
+/** The registry identity label for the same transaction. Kept beside the
+ *  subscription id because the two must namespace identically or a sandbox
+ *  link would write a sandbox subscription index onto the production user. */
+export function appleUserLabel(originalTransactionId: string, environment: string): string {
+  return isSandboxEnvironment(environment)
+    ? `apple_sandbox_${originalTransactionId}`
+    : `apple_${originalTransactionId}`;
 }
 
 interface LinkOutcome {
@@ -140,24 +185,24 @@ interface LinkOutcome {
 export function evaluateTransaction(
   payload: AppleTransactionPayload,
   opts: { now: number; allowedBundleIds: string[]; expectedEnvironment?: string },
-): { ok: true; plan: ApplePlanId; subStatus: SubStatus; originalTransactionId: string; expiresAt?: number }
+): { ok: true; plan: ApplePlanId; subStatus: SubStatus; originalTransactionId: string; environment: string; expiresAt?: number }
   | { ok: false; status: number; error: string } {
   const { now, allowedBundleIds: bundles, expectedEnvironment } = opts;
 
   if (!payload.bundleId || !bundles.includes(payload.bundleId)) {
     return { ok: false, status: 403, error: "bundle_mismatch" };
   }
-  // FAIL CLOSED: an unset APPLE_ENVIRONMENT accepts no receipt. A deployment
-  // must explicitly name every environment it intends to accept.
+  // Sandbox receipts must not silently become production revenue. The gate
+  // still fails closed on an unset APPLE_ENVIRONMENT (accepts nothing), but a
+  // deployment that names Sandbox no longer conflates the two: the accepted
+  // environment rides out of here and namespaces the identity downstream, so a
+  // sandbox subscriber is a separate, countable, revocable tenant rather than
+  // an indistinguishable one. See {@link appleSubscriptionId}.
   //
-  // A payload with NO environment is rejected too. Apple has stamped it on
-  // every JWSTransaction for years, and "the field we authenticate on is
-  // missing" is not a case to wave through.
-  const allowedEnvironments = (expectedEnvironment ?? "")
-    .split(",")
-    .map((name) => name.trim())
-    .filter(Boolean);
-  if (!payload.environment || !allowedEnvironments.includes(payload.environment)) {
+  // A payload with NO environment is rejected. Apple has stamped it on every
+  // JWSTransaction for years, and "the field we authenticate on is missing" is
+  // not a case to wave through.
+  if (!payload.environment || !parseAllowedEnvironments(expectedEnvironment).includes(payload.environment)) {
     return { ok: false, status: 403, error: "environment_mismatch" };
   }
   const originalTransactionId = payload.originalTransactionId ?? payload.transactionId;
@@ -176,7 +221,14 @@ export function evaluateTransaction(
   if (payload.expiresDate != null && payload.expiresDate <= now) {
     return { ok: false, status: 403, error: "subscription_expired" };
   }
-  return { ok: true, plan, subStatus: "active", originalTransactionId, expiresAt: payload.expiresDate };
+  return {
+    ok: true,
+    plan,
+    subStatus: "active",
+    originalTransactionId,
+    environment: payload.environment,
+    expiresAt: payload.expiresDate,
+  };
 }
 
 /**
@@ -204,11 +256,7 @@ export function notificationTransactionIsOurs(
   }
   // Same fail-closed default as the link path: an unset APPLE_ENVIRONMENT
   // accepts nothing, and a payload with no environment is not waved through.
-  const allowed = (opts.expectedEnvironment ?? "")
-    .split(",")
-    .map((name) => name.trim())
-    .filter(Boolean);
-  if (!txn.environment || !allowed.includes(txn.environment)) {
+  if (!txn.environment || !parseAllowedEnvironments(opts.expectedEnvironment).includes(txn.environment)) {
     return { ok: false, reason: "environment_mismatch" };
   }
   if (!planForProductId(txn.productId)) {
@@ -250,6 +298,9 @@ export async function handleAppStoreLink(request: Request, env: Env): Promise<Re
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       original_transaction_id: verdict.originalTransactionId,
+      // Namespaces the identity. A sandbox purchase gets its own record so it
+      // can never rotate a paying subscriber's token or be counted as revenue.
+      environment: verdict.environment,
       plan: verdict.plan,
       sub_status: verdict.subStatus,
       period_start: payload.purchaseDate,
@@ -328,7 +379,10 @@ export async function handleAppStoreNotifications(request: Request, env: Env): P
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        stripe_subscription_id: appleSubscriptionId(originalTransactionId),
+        // Same namespacing as the link path: a sandbox notification must find
+        // the sandbox record, and must not touch a production one that happens
+        // to share an originalTransactionId.
+        stripe_subscription_id: appleSubscriptionId(originalTransactionId, txn.environment ?? ""),
         sub_status: subStatus,
         plan: planForProductId(txn.productId),
         period_start: txn.purchaseDate,

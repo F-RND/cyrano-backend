@@ -75,6 +75,10 @@ export const MAX_COST_SCAN = 10000;
 /** Where this subject's money (if any) comes from. */
 export type SubjectSource =
   | "apple"
+  /** A TestFlight, App Review or sandbox-tester subscription. Real usage, no
+   *  money: Apple never charges for a sandbox purchase, so this prices at zero
+   *  like a promo key rather than at the plan's list price. */
+  | "apple-sandbox"
   | "stripe"
   | "promo"
   | "license-relay"
@@ -119,12 +123,19 @@ export interface CostSubjectRecord {
 }
 
 const APPLE_SUBSCRIPTION_PREFIX = "apple:";
+/** Sandbox subscriptions are namespaced a second time (appstore.ts
+ *  `appleSubscriptionId`). Strip BOTH segments or the operator gets
+ *  `sandbox:2000…` pasted into App Store Connect and finds nothing. */
+const APPLE_SANDBOX_SUBSCRIPTION_PREFIX = "apple:sandbox:";
 
 export function purchaseLinkFor(u: CostSubjectRecord): PurchaseLink {
   const sub = u.stripeSubscriptionId;
-  const apple = sub?.startsWith(APPLE_SUBSCRIPTION_PREFIX)
-    ? sub.slice(APPLE_SUBSCRIPTION_PREFIX.length)
-    : null;
+  const appleSandbox = sub?.startsWith(APPLE_SANDBOX_SUBSCRIPTION_PREFIX) ?? false;
+  const apple = appleSandbox
+    ? (sub as string).slice(APPLE_SANDBOX_SUBSCRIPTION_PREFIX.length)
+    : sub?.startsWith(APPLE_SUBSCRIPTION_PREFIX)
+      ? sub.slice(APPLE_SUBSCRIPTION_PREFIX.length)
+      : null;
   const common = {
     apple_original_transaction_id: apple,
     // The field name is Stripe's and the index it feeds is Stripe's, but an
@@ -136,7 +147,7 @@ export function purchaseLinkFor(u: CostSubjectRecord): PurchaseLink {
     promo_expires_at: isoOrNull(u.promoExpiresAt),
     sub_expires_at: isoOrNull(u.subExpiresAt),
   };
-  if (apple) return { source: "apple", ...common };
+  if (apple) return { source: appleSandbox ? "apple-sandbox" : "apple", ...common };
   if (sub) return { source: "stripe", ...common };
   // A promo key with `months: 0` is unlimited and stores NO expiry (promo.ts
   // promoExpiryFromMonths), so the label prefix is the only signal left for
@@ -316,7 +327,12 @@ function revenueFor(
   // Checked BEFORE entitlement so an EXPIRED promo still reads "comped": the
   // number is the same 0 either way, and "comped" is the truer word for a key
   // that was never going to earn anything.
-  if (purchase.source === "promo") return { micros: 0, basis: "comped" };
+  // Same reasoning for a sandbox subscription: Apple charged nobody, so the
+  // plan's list price would be an invented number. Checked before entitlement
+  // for the same reason a promo key is.
+  if (purchase.source === "promo" || purchase.source === "apple-sandbox") {
+    return { micros: 0, basis: "comped" };
+  }
   // Not entitled → not paying, whatever the plan field still says. Operator and
   // self-hosted tenants (no subStatus, no promo) are entitled by construction
   // and never reach this line, so this arm is specifically the lapsed
@@ -358,8 +374,9 @@ export interface CostLegRow {
 export interface CostRow {
   user_id: string;
   /** The registry label. For a subscriber this is derived from the purchase
-   * record (`apple_<otid>` / `stripe_<sub>`); for an operator tenant it is
-   * whatever the operator typed. Never an email, never a device. */
+   * record (`apple_<otid>`, `apple_sandbox_<otid>` for a TestFlight or App
+   * Review purchase, `stripe_<sub>`); for an operator tenant it is whatever
+   * the operator typed. Never an email, never a device. */
   label: string;
   first_seen_at: string;
   plan: string | null;
