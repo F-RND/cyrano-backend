@@ -1,68 +1,83 @@
 # Cyrano Backend
 
-A self-hostable Cloudflare Worker for Cyrano's opt-in copilot features. It accepts transcript text from an authenticated Cyrano client, stores session state in Durable Objects, and sends analysis windows to the configured LLM provider. Raw audio is not part of the backend protocol.
+The server half of Cyrano, a conversation copilot for iPhone and Mac. The client transcribes and diarizes on-device; this Cloudflare Worker takes the resulting text, keeps the session, runs the analysis passes against an LLM, and pushes what it finds back to the client while the conversation is still happening.
 
-## What is included
+Run your own so that your transcripts land on your Cloudflare account, your analysis runs on your API key, and the only server that ever sees your conversations is one you deployed.
 
-- Worker source and JSON schemas
-- Durable Object session, registry, and account-inbox classes
-- Authentication, tenant isolation, retention, redaction, and purge behavior
-- Anthropic-compatible analysis and optional integrations that fail closed when unconfigured
-- Unit and integration tests
+- **Live extraction** — commitments, open asks, subtext, next-move suggestions, decisions, and whisper candidates from a rolling transcript window, in one batched call.
+- **Sessions that survive the network** — WebSocket sessions backed by Durable Objects, with resume-from-sequence, presence, and end-of-session flush.
+- **Your keys or the operator's** — clients can bring an Anthropic or OpenRouter key per session; a client key is never failed over onto the operator's.
+- **Retention is the client's call** — `ephemeral`, `24h`, or `pinned`, narrowable mid-session, with redaction and purge.
+- **Agents can read and write** — a scoped agent token lets an external assistant read session context and push notes back; an OAuth/MCP surface lets ChatGPT and Claude connect as connectors.
+- **Fails closed** — billing, App Store, trials, price-testing, fallback providers, and content logging are all off until you deliberately configure them.
 
-Operator-only beta distribution scripts, private model-evaluation assets and
-live-provider probes, private deployment identifiers, production secrets, and
-monorepo history are intentionally excluded. The source still contains an
-optional shadow price-testing path; it is disabled in the checked-in
-configuration and should remain disabled unless an operator deliberately
-configures and reviews its additional provider egress.
+## How it works
 
-## Requirements
+```
+Cyrano client ──WebSocket──▶ SessionDO ──▶ LLM (Anthropic Messages API)
+  transcript segments          rolling window, batched extraction
+  ◀── analysis.result ─────────┘
 
-- Node.js 22.12 or newer
-- A Cloudflare account with Workers and Durable Objects
-- An Anthropic API key (or a key for an Anthropic-compatible gateway; see [Configuration reference](#configuration-reference))
+                              RegistryDO      users, tenants, entitlements,
+                                              license and promo keys, usage
+                              AccountInboxDO  per-account index and
+                                              agent → user pings
+```
 
-## Install and verify
+Three Durable Object classes hold all state; there is no database to provision. `SessionDO` owns one conversation: it buffers transcript segments, windows them, runs the analysis passes (see [`schemas/`](schemas/) for the tool schemas the model is forced to call), meters usage, and streams results back. `RegistryDO` is the single-instance directory of who may connect and what they are entitled to. `AccountInboxDO` is one-per-account: a session index the client can list, and a standing inbox for proactive agent messages.
+
+Stateless HTTP routes cover everything that does not need a live session: `/analyze` and `/ask` over a supplied transcript, `/dictation/polish`, `/context/refine`, and a `/health/llm` probe that spends one output token to verify a key.
+
+## Quick start
+
+You need Node.js 22.12+, a Cloudflare account with Workers and Durable Objects, and an Anthropic API key.
 
 ```sh
+git clone https://github.com/johnathan-greenaway/cyrano-backend.git
+cd cyrano-backend
 npm ci
-npm run typecheck
-npm test
-npm run deploy:dry-run
+npm run typecheck && npm test      # runs offline, no API key needed
+
+npx wrangler login
+npx wrangler secret put AUTH_TOKEN  # any long random string; clients present it as a bearer token
+npx wrangler secret put LLM_API_KEY # your Anthropic key
+npm run deploy
 ```
+
+Wrangler deploys to whichever account you logged in with and prints the Worker URL. Nothing in [`wrangler.jsonc`](wrangler.jsonc) is bound to a particular account, hostname, or billing catalog; CI runs a dry-run deploy against it on every push.
+
+Then, in the Cyrano app, open Settings → Backend and enter the Worker URL and the `AUTH_TOKEN` you set. Start a session; the analysis panel should populate within the first window.
+
+`GET /health` on the deployed URL returns `ok` without authentication if you want to check the deploy before touching the app.
 
 ## Local development
 
 ```sh
-cp .dev.vars.example .dev.vars
-# Replace both placeholder values in .dev.vars.
-npm run dev
+cp .dev.vars.example .dev.vars   # then fill in AUTH_TOKEN and LLM_API_KEY
+npm run dev                      # wrangler dev, with local Durable Objects
+npm run test:watch
 ```
 
-`.dev.vars`, `.env`, Wrangler state, generated reports, and dependency directories are ignored. Never commit credentials or transcripts.
+`.dev.vars` is ignored by git, as are `.env*`, Wrangler state, and anything matching the generated-report patterns in [`.gitignore`](.gitignore). The test suite runs offline against mocked providers; no API key or Cloudflare account is needed to run it.
 
-## Deploy
+Layout:
 
-Authenticate Wrangler, set the two required secrets, and deploy:
-
-```sh
-npx wrangler login
-npx wrangler secret put AUTH_TOKEN
-npx wrangler secret put LLM_API_KEY
-npm run deploy
-```
-
-Wrangler uses the Cloudflare account selected by your authenticated session. The checked-in configuration contains no account ID, production hostname, bucket ID, email binding, or billing catalog ID.
-
-### Required secrets
-
-| Name | Purpose |
+| Path | What lives there |
 | --- | --- |
-| `AUTH_TOKEN` | Operator bearer token used by Cyrano clients and administrative endpoints |
-| `LLM_API_KEY` | Anthropic API key used for copilot analysis on the operator's account |
+| `src/index.ts` | Route table and request auth; forwards into the Durable Objects |
+| `src/session-do.ts`, `src/registry-do.ts`, `src/account-inbox-do.ts` | The three Durable Object classes |
+| `src/analysis/` | Windowing, the batched extraction pass, custom categories, whisper tiers, re-analysis, dictation polish |
+| `src/llm/` | Provider client (Anthropic native + OpenAI-compatible), fallback leg, pricing and spend metering |
+| `src/policy/` | The interruption-etiquette grammar and simulator that gates whisper delivery |
+| `src/auth.ts`, `src/entitlement.ts`, `src/license.ts`, `src/promo.ts`, `src/trial.ts` | Identity, plans, and the key formats |
+| `src/stripe.ts`, `src/appstore*.ts` | Optional hosted-tier billing, inert without their secrets |
+| `src/chatgpt-mcp.ts` | OAuth 2.1 / PKCE authorization server and MCP resource for connector clients |
+| `schemas/` | JSON schemas for every forced tool call the model makes |
+| `test/` | Vitest unit and integration tests |
 
-Use a randomly generated `AUTH_TOKEN` and store both values with `wrangler secret put`. Do not put real values in `wrangler.jsonc`, `.dev.vars.example`, shell history, issue reports, or chat messages.
+## Bring your own key
+
+A client may send `llm_api_key` (with `llm_provider` `anthropic` or `openrouter` and an optional `llm_model`) in its session `hello`. That session then runs on the user's key and the user's provider; the operator's `LLM_API_KEY` is not touched, usage is counted but not priced, and the operator's fallback leg is never applied. The key is held in the Durable Object's memory for the connection and is cleared on the next `hello` that omits it.
 
 ## Configuration reference
 
@@ -143,33 +158,19 @@ Fans each hosted analysis window out to additional providers on the operator's k
 | `PRICE_TEST_SAMPLE_RATE` | var | `1` | Fraction of windows to shadow, `0`–`1`. |
 | `PRICE_TEST_TARGETS` | var | `[]` | JSON array of `{ label, provider, baseUrl, model, keyEnv, inputPerM, outputPerM }`. |
 
-### Safe checked-in defaults
+## What stays off until you turn it on
 
-- Transcript-derived content logging is disabled.
-- Shadow price testing is disabled.
-- Provider fallback is disabled.
-- App Store link and notification routes are disabled.
-- Free-cold enrollment is disabled.
-- Cloudflare observability is disabled.
-- Hosted billing and transactional-email bindings are absent.
+Every optional integration either returns 503 or is skipped entirely when its configuration is absent, and the checked-in `wrangler.jsonc` sets each flag to its off value explicitly so the dry-run bindings table shows the posture:
 
-Optional code paths remain inert or return an unavailable response unless an operator deliberately adds their bindings, variables, and secrets. Review those paths and their data flows before enabling them.
+- Transcript-derived content in logs and exception strings (`TRANSCRIPT_CONTENT_LOGGING`)
+- The fallback provider leg (`FALLBACK_PROVIDER`)
+- Shadow price testing across additional providers (`PRICE_TEST_ENABLED`)
+- App Store link and notification routes (`APP_STORE_ENABLED`, plus `APPLE_BUNDLE_IDS` and `APPLE_ENVIRONMENT`)
+- Token-less free-tier enrollment (`FREE_COLD_ENROLLMENT_ENABLED`)
+- Stripe checkout and webhooks, trials, and the hosted paid model (their secrets)
+- Cloudflare observability (`observability.enabled`)
 
-### Optional token-less routes
-
-These public routes use feature flags with literal, case-sensitive `"true"`
-opt-ins. Any missing, empty, or other value leaves the route unavailable:
-
-| Flag | Default | Additional required configuration |
-| --- | --- | --- |
-| `APP_STORE_ENABLED` | `false` | `APPLE_BUNDLE_IDS` (comma-separated allowlist) and `APPLE_ENVIRONMENT` (exact accepted environment) |
-| `FREE_COLD_ENROLLMENT_ENABLED` | `false` | None; review the enrollment and relay data flow before opting in |
-
-There are no built-in App Store bundle identifiers or environment defaults. An
-enabled App Store route still rejects all transactions until both values are
-configured. Keep `TRANSCRIPT_CONTENT_LOGGING` unset or `false`; setting it to
-`true` permits transcript-derived diagnostics and provider response bodies in
-exception strings.
+Flags are opt-in only on the literal string `"true"`; a missing, empty, or differently-cased value leaves the route unavailable. Read the data-flow notes in the section below before enabling anything that adds a provider or a public route.
 
 ## Data and trust boundaries
 
@@ -182,18 +183,14 @@ exception strings.
 
 See [SECURITY.md](SECURITY.md) before exposing a deployment to the internet.
 
-## Scope and limitations
+## Scope
 
-This is a Cloudflare-specific deployment, not a portable server image. The repository does not include the Cyrano Apple client, hosted service configuration, production credentials, operator mailing tools, payment setup, or private model-evaluation assets.
-
-The package remains marked `private` only to prevent accidental npm publication. Source licensing is governed by [Apache License 2.0](LICENSE).
-
-## License and attribution
-
-Licensed under Apache License 2.0. Preserve the license, copyright notices, modification notices, and [NOTICE](NOTICE) content when redistributing covered work. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for dependency information.
-
-The license covers source code, not trademarks, hosted-service access, credentials, or rights to the Cyrano name and branding beyond customary attribution.
+This is a Cloudflare-specific Worker, not a portable server image; Durable Objects are load-bearing. The clients (Apple, Linux), the hosted service's own configuration, and the model-evaluation harness live elsewhere. The package is marked `private` in `package.json` only to prevent accidental npm publication.
 
 ## Contributing and security
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes. Report vulnerabilities privately according to [SECURITY.md](SECURITY.md); do not put credentials, transcripts, customer information, or unredacted diagnostics in a public issue.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR; changes to auth, retention, redaction, egress, schemas, or Durable Object migrations need tests and a security-minded review. Report vulnerabilities privately through GitHub's advisory flow as described in [SECURITY.md](SECURITY.md) — never with real transcripts, keys, or customer data in the report.
+
+## License
+
+Apache License 2.0. Preserve the [LICENSE](LICENSE), copyright notices, and [NOTICE](NOTICE) when redistributing; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for dependency licenses. The license covers the source; it does not grant rights to the Cyrano name or branding beyond customary attribution, nor access to any hosted service.
