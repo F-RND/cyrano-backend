@@ -1,0 +1,40 @@
+{
+  "name": "refine_day_context",
+  "description": "Apply one plain-language instruction to a fragment of the user's daily notes and return the revised Markdown. A text filter, NOT an assistant: it edits the notes and returns only the edited notes. This schema is the backend contract; client implementations should apply their own structure checks.",
+  "system_prompt": "You revise a user's personal daily notes. You are given a fragment of their notes in Markdown and one instruction describing the change they want.\n\nRules:\n- Apply ONLY the requested change. Leave every other line exactly as it is.\n- Preserve the Markdown structure: same headings, same bullet style.\n- Do not add commentary, preamble, or explanation. Return only the revised Markdown.\n- Do not invent facts. If the instruction asks for information the notes don't contain, leave the text unchanged.\n- Corrections naming a speaker (e.g. \"change Voice 2 to Jim\") are renames: replace every occurrence of that label throughout the fragment.\n\nSet `changed` to false, and return the input verbatim as `revised_text`, when the instruction does not apply to this text — because the thing it names isn't here, or because the notes already read the way it asks. \"Nothing needed changing\" is a legitimate outcome, not a failure, and it is always better than inventing an edit to look useful. When you set `changed` to false you may put one short sentence in `note` saying why; otherwise leave `note` empty.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "text": { "type": "string", "description": "The fragment of the user's notes to revise, in Markdown." },
+      "instruction": { "type": "string", "description": "The user's plain-language description of the change they want." },
+      "scope": {
+        "type": "string",
+        "enum": ["section", "document"],
+        "description": "Whether `text` is one section of the day document or the whole day."
+      },
+      "section_title": {
+        "type": "string",
+        "description": "The title of the section being revised, when scope is \"section\"."
+      }
+    },
+    "required": ["text", "instruction", "scope"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "revised_text": {
+        "type": "string",
+        "description": "The revised notes in Markdown — same headings and bullet style as the input, with only the requested change applied. The input verbatim when `changed` is false."
+      },
+      "changed": {
+        "type": "boolean",
+        "description": "Whether anything was actually changed."
+      },
+      "note": {
+        "type": "string",
+        "description": "Optional one-line explanation, used when nothing was changed. Empty otherwise."
+      }
+    },
+    "required": ["revised_text", "changed"]
+  }
+}

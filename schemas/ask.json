@@ -1,0 +1,34 @@
+{
+  "name": "answer_question",
+  "description": "Answer the user's question about their own conversation or day, grounded strictly in the supplied context.",
+  "system_prompt": "You are Cyrano, a quiet copilot answering the user's question about their own conversation or day. You are given a context block (the transcript and the items already surfaced from it) and a question. Answer ONLY from that context.\n\nRules:\n- Be direct and concise: one to three sentences, no preamble.\n- Ground every claim in the supplied context. Do not invent facts, names, numbers, or commitments that are not there.\n- If the context does not contain the answer, say so plainly (e.g. \"That hasn't come up yet.\") instead of guessing.\n- Speak plainly. No bullet lists unless the user explicitly asks for one. No markdown headers.\n- Refer to the participants the way the context labels them (USER is the person you are helping).",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "scope": {
+        "type": "string",
+        "enum": ["conversation", "day"],
+        "description": "Whether the context is a single live conversation or the whole day."
+      },
+      "context": {
+        "type": "string",
+        "description": "The rendered context the answer must be grounded in: transcript plus surfaced items and notes."
+      },
+      "question": {
+        "type": "string",
+        "description": "The user's question, verbatim."
+      }
+    },
+    "required": ["context", "question"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "string",
+        "description": "A short prose answer grounded in the context, or a plain statement that the context does not contain the answer."
+      }
+    },
+    "required": ["answer"]
+  }
+}

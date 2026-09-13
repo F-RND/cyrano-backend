@@ -1,0 +1,36 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cyrano-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": false },
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_DO", "class_name": "SessionDO" },
+      { "name": "REGISTRY_DO", "class_name": "RegistryDO" },
+      { "name": "ACCOUNT_INBOX_DO", "class_name": "AccountInboxDO" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SessionDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["RegistryDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["AccountInboxDO"] }
+  ],
+
+  "vars": {
+    "TRANSCRIPT_CONTENT_LOGGING": "false",
+    "LLM_BASE_URL": "https://api.anthropic.com/v1",
+    "LLM_MODEL": "claude-sonnet-5",
+    "FALLBACK_PROVIDER": "",
+    "PRICE_TEST_ENABLED": "false",
+    "PRICE_TEST_TARGETS": "[]",
+    // Public App Store routes additionally require APPLE_BUNDLE_IDS and
+    // APPLE_ENVIRONMENT; neither has a checked-in default.
+    "APP_STORE_ENABLED": "false",
+    // Token-less free-cold identity minting is an explicit opt-in.
+    "FREE_COLD_ENROLLMENT_ENABLED": "false"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "name": "extract_asks",
+  "description": "Portable hermes-agent tool/prompt schema for the Cyrano asks analysis pass. Extract things OTHER requested of USER that remain unanswered.",
+  "system_prompt": "You read a short window of a diarized conversation transcript (USER / OTHER / UNKNOWN). Extract requests OTHER made of USER — questions, favors, or asks that expect a response or action from USER — that USER has not yet clearly answered or agreed/declined within this window. Do not extract asks already listed in `known_open_asks`. If the transcript shows USER answering or declining an ask within the window, do not extract it (it is resolved, not open). Rhetorical questions and small talk are not asks. If there are no open asks, return an empty array. `user_context`, when present, is reference material the USER deliberately attached mid-conversation (clipboard text, an OCR'd app-window snapshot, or a picked image). It is not conversation: it has no speaker and no seq, must never be treated as a transcript line or attributed to anyone, and must never be extracted from on its own. Use it only to enrich or disambiguate items grounded in actual transcript lines — e.g. resolving 'this ticket' to the ticket's title. `source_seq` always references a transcript line.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "known_open_asks": { "type": "array", "items": { "type": "string" } },
+      "transcript_window": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "seq": { "type": "integer" },
+            "speaker": { "type": "string", "enum": ["USER", "OTHER", "UNKNOWN", "SYSTEM"] },
+            "text": { "type": "string" },
+            "speaker_slot": { "type": "integer", "description": "Which distinct SYSTEM-feed voice said this line (2, 3, \u2026). Absent on mic lines." }
+          },
+          "required": ["seq", "speaker", "text"]
+        }
+      },
+      "user_context": {
+        "type": "array",
+        "description": "Optional reference material the USER deliberately attached (clipboard / window snapshot / picked image). Not conversation — see system prompt.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "source": { "type": "string", "enum": ["clipboard", "window", "file"] },
+            "app_name": { "type": "string" },
+            "window_title": { "type": "string" },
+            "file_name": { "type": "string" },
+            "text": { "type": "string" }
+          },
+          "required": ["source", "text"]
+        }
+      }
+    },
+    "required": ["transcript_window"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "asks": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "description": "The ask, restated concisely, e.g. \"Can you review the PR before EOD\"." },
+            "requested_by": { "type": "string", "enum": ["OTHER"] },
+            "answered": { "type": "boolean", "enum": [false] },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "source_seq": { "type": "integer" }
+          },
+          "required": ["text", "requested_by", "answered", "confidence", "source_seq"]
+        }
+      }
+    },
+    "required": ["asks"]
+  }
+}

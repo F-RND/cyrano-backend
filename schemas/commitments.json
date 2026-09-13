@@ -1,0 +1,61 @@
+{
+  "name": "extract_commitments",
+  "description": "Portable hermes-agent tool/prompt schema for the Cyrano commitments analysis pass. Given a rolling window of diarized transcript segments, extract things any speaker agreed to do (USER's own commitments and commitments the counterpart made).",
+  "system_prompt": "You read a short window of a diarized conversation transcript. Lines are labeled USER (the wearer of the device) or OTHER (anyone else in the room) or UNKNOWN (diarization was not confident) or SYSTEM (audio captured from the device's output — a meeting feed or video). Extract commitments any speaker made, whoever made the promise: USER committing to an action, or OTHER/SYSTEM committing to something (e.g. \"I'll send you the signed contract by Friday\"). Extract only real agreements — clear, explicit undertakings — not things merely discussed hypothetically or proposed and never agreed to. Set `source_seq` to the line where the commitment was actually made (the committer's line), so ownership can be attributed to the speaker who made it. Do not extract commitments already listed in `known_commitments` (avoid duplicates). If a deadline is stated or strongly implied (\"by Friday\", \"before the trip\"), infer an ISO date relative to `now`; otherwise use null — never guess a date that was not implied. Confidence reflects how explicit the agreement was, not how important it is. If there are no new commitments, return an empty array. `user_context`, when present, is reference material the USER deliberately attached mid-conversation (clipboard text, an OCR'd app-window snapshot, or a picked image). It is not conversation: it has no speaker and no seq, must never be treated as a transcript line or attributed to anyone, and must never be extracted from on its own. Use it only to enrich or disambiguate items grounded in actual transcript lines — e.g. resolving 'this ticket' to the ticket's title. `source_seq` always references a transcript line.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "now": { "type": "string", "format": "date-time" },
+      "known_commitments": { "type": "array", "items": { "type": "string" } },
+      "transcript_window": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "seq": { "type": "integer" },
+            "speaker": { "type": "string", "enum": ["USER", "OTHER", "UNKNOWN", "SYSTEM"] },
+            "text": { "type": "string" },
+            "speaker_slot": { "type": "integer", "description": "Which distinct SYSTEM-feed voice said this line (2, 3, …). Absent on mic lines." }
+          },
+          "required": ["seq", "speaker", "text"]
+        }
+      },
+      "user_context": {
+        "type": "array",
+        "description": "Optional reference material the USER deliberately attached (clipboard / window snapshot / picked image). Not conversation — see system prompt.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "source": { "type": "string", "enum": ["clipboard", "window", "file"] },
+            "app_name": { "type": "string" },
+            "window_title": { "type": "string" },
+            "file_name": { "type": "string" },
+            "text": { "type": "string" }
+          },
+          "required": ["source", "text"]
+        }
+      }
+    },
+    "required": ["now", "transcript_window"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "commitments": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "description": "The commitment, restated concisely in third person, e.g. \"Send the deck to Priya\"." },
+            "owner": { "type": "string", "enum": ["USER", "OTHER", "SYSTEM"], "description": "Who made the commitment. The server re-derives this — and a numeric owner_slot naming the specific SYSTEM-feed voice — from source_seq's speaker, so a best-effort value here is fine and owner_slot is never sent by you." },
+            "inferred_deadline": { "type": ["string", "null"], "description": "ISO date, or null if no deadline was implied." },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "source_seq": { "type": "integer", "description": "seq of the line where the commitment was made (the committer's line)." }
+          },
+          "required": ["text", "owner", "inferred_deadline", "confidence", "source_seq"]
+        }
+      }
+    },
+    "required": ["commitments"]
+  }
+}

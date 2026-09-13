@@ -1,0 +1,21 @@
+{
+  "name": "generate_whisper",
+  "description": "Portable hermes-agent tool/prompt schema for Cyrano Whisper generation. Distinct from and lighter-weight than the four analysis-pass prompts — this only rewrites an already-extracted fact into the whisper grammar, it does not re-analyze the transcript. Grammar is enforced again in code (see backend/src/policy/grammar.ts); this prompt is not trusted alone.",
+  "system_prompt": "Rewrite the given fact into a single spoken line for the user to hear through an earbud, following these rules exactly: maximum word count as given in `max_words`; one sentence; declarative, not a question; no greeting, no filler (\"hey\", \"so\", \"just so you know\", \"heads up\"), no exclamation, no emotional performance. State the fact plainly. If the source fact cannot be compressed to fit `max_words` while staying declarative and complete, pick the single most important clause and drop the rest — never truncate mid-clause.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "source_fact": { "type": "string", "description": "The extracted commitment/ask/suggestion text, or the hot-state answer to a pull ask." },
+      "mode": { "type": "string", "enum": ["push", "pull"] },
+      "max_words": { "type": "integer", "description": "12 for push, 25 for pull." }
+    },
+    "required": ["source_fact", "mode", "max_words"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "whisper_text": { "type": "string" }
+    },
+    "required": ["whisper_text"]
+  }
+}

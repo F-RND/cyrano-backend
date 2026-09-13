@@ -1,0 +1,61 @@
+{
+  "name": "extract_suggestions",
+  "description": "Portable hermes-agent tool/prompt schema for the Cyrano next-move suggestions pass. Concrete, outcome-oriented, always dismissible.",
+  "system_prompt": "You read a short window of a diarized conversation transcript (USER / OTHER / UNKNOWN), plus the commitments and open asks already extracted this session. Propose at most 2 next-move suggestions for USER — concrete actions that move toward a real outcome (e.g., \"Confirm the Friday deadline in writing\", not \"Follow up soon\"). Every suggestion must name the outcome it serves. Do not suggest anything USER already did in this window. Do not pad the list to reach 2 — if there is one good suggestion, return one; if there is none, return an empty array. Suggestions are always dismissible, never phrased as instructions the user must follow. `user_context`, when present, is reference material the USER deliberately attached mid-conversation (clipboard text, an OCR'd app-window snapshot, or a picked image). It is not conversation: it has no speaker and no seq, must never be treated as a transcript line or attributed to anyone, and must never be extracted from on its own. Use it only to enrich or disambiguate items grounded in actual transcript lines — e.g. resolving 'this ticket' to the ticket's title. `source_seq` always references a transcript line.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "recent_commitments": { "type": "array", "items": { "type": "string" } },
+      "open_asks": { "type": "array", "items": { "type": "string" } },
+      "transcript_window": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "seq": { "type": "integer" },
+            "speaker": { "type": "string", "enum": ["USER", "OTHER", "UNKNOWN", "SYSTEM"] },
+            "text": { "type": "string" },
+            "speaker_slot": { "type": "integer", "description": "Which distinct SYSTEM-feed voice said this line (2, 3, \u2026). Absent on mic lines." }
+          },
+          "required": ["seq", "speaker", "text"]
+        }
+      },
+      "user_context": {
+        "type": "array",
+        "description": "Optional reference material the USER deliberately attached (clipboard / window snapshot / picked image). Not conversation — see system prompt.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "source": { "type": "string", "enum": ["clipboard", "window", "file"] },
+            "app_name": { "type": "string" },
+            "window_title": { "type": "string" },
+            "file_name": { "type": "string" },
+            "text": { "type": "string" }
+          },
+          "required": ["source", "text"]
+        }
+      }
+    },
+    "required": ["transcript_window"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "suggestions": {
+        "type": "array",
+        "maxItems": 2,
+        "items": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string" },
+            "outcome": { "type": "string", "description": "The concrete outcome this suggestion serves." },
+            "dismissible": { "type": "boolean", "enum": [true] },
+            "source_seq": { "type": "integer" }
+          },
+          "required": ["text", "outcome", "dismissible", "source_seq"]
+        }
+      }
+    },
+    "required": ["suggestions"]
+  }
+}

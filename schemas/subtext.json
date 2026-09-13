@@ -1,0 +1,60 @@
+{
+  "name": "extract_subtext",
+  "description": "Portable hermes-agent tool/prompt schema for the Cyrano subtext analysis pass. Surfaces speculative reads of tone — never delivered as fact, never auto-pushed to audio.",
+  "system_prompt": "You read a short window of a diarized conversation transcript (USER / OTHER / UNKNOWN / SYSTEM). A SYSTEM line may carry `speaker_slot` (2, 3, …) identifying WHICH distinct meeting-feed voice said it — attribute every observation to the specific voice (\"Speaker 2 may be…\"), never to an undifferentiated SYSTEM when the line carries a slot, and never merge different slots into one voice. Look for hesitation, disagreement being swallowed rather than voiced, or a mismatch between stated enthusiasm and how something is phrased. This is speculative reading of tone from text alone, not a transcript of emotion — you will be wrong sometimes, and that is acceptable as long as it is clearly labeled as speculation. At most 2 items per window, and most windows deserve zero. Filler (\"um\", \"like\", \"you know\"), routine self-correction, and thinking-aloud are just how people talk — they are NOT hesitation and must never be flagged on their own. Flag hesitation only when the hedging is unusually heavy for that speaker AND attached to something consequential — a decision, a disagreement, a commitment, a risk. swallowed_disagreement and enthusiasm_mismatch are the valuable reads — when competing with a hesitation for the window's 2 slots, they win. Do not re-flag the same speaker's same discomfort about the same topic more than once. Every item you return is speculation and must never be phrased as established fact. Prefer silence over a weak read: if nothing stands out, return an empty array. `user_context`, when present, is reference material the USER deliberately attached mid-conversation (clipboard text, an OCR'd app-window snapshot, or a picked image). It is not conversation: it has no speaker and no seq, must never be treated as a transcript line or attributed to anyone, and must never be extracted from on its own. Use it only to enrich or disambiguate items grounded in actual transcript lines — e.g. resolving 'this ticket' to the ticket's title. `source_seq` always references a transcript line.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "transcript_window": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "seq": { "type": "integer" },
+            "speaker": { "type": "string", "enum": ["USER", "OTHER", "UNKNOWN", "SYSTEM"] },
+            "text": { "type": "string" },
+            "speaker_slot": { "type": "integer", "description": "Which distinct SYSTEM-feed voice said this line (2, 3, …). Absent on mic lines." }
+          },
+          "required": ["seq", "speaker", "text"]
+        }
+      },
+      "user_context": {
+        "type": "array",
+        "description": "Optional reference material the USER deliberately attached (clipboard / window snapshot / picked image). Not conversation — see system prompt.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "source": { "type": "string", "enum": ["clipboard", "window", "file"] },
+            "app_name": { "type": "string" },
+            "window_title": { "type": "string" },
+            "file_name": { "type": "string" },
+            "text": { "type": "string" }
+          },
+          "required": ["source", "text"]
+        }
+      }
+    },
+    "required": ["transcript_window"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "subtext": {
+        "type": "array",
+        "maxItems": 2,
+        "items": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "description": "Phrased as a hedge naming the specific voice, e.g. \"Speaker 2 may be hesitant about the timeline\", never as fact." },
+            "label": { "type": "string", "enum": ["hesitation", "swallowed_disagreement", "enthusiasm_mismatch"] },
+            "speculation": { "type": "boolean", "enum": [true] },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "source_seq": { "type": "integer" }
+          },
+          "required": ["text", "label", "speculation", "confidence", "source_seq"]
+        }
+      }
+    },
+    "required": ["subtext"]
+  }
+}

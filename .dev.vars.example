@@ -1,0 +1,53 @@
+# Copy this file to .dev.vars and replace both placeholders for local development.
+# .dev.vars is ignored by git. Values here override the `vars` block in
+# wrangler.jsonc when running `npm run dev`. In production, secrets go through
+# `npx wrangler secret put NAME` and variables go in wrangler.jsonc `vars`.
+# See README.md "Configuration reference" for every variable.
+
+# --- Required ---------------------------------------------------------------
+AUTH_TOKEN=replace-with-a-random-local-token
+# Anthropic Messages API key (or a key for an Anthropic-compatible gateway).
+# The primary path does not accept OpenAI keys; see the fallback / hosted
+# groups below for OpenAI-compatible endpoints.
+LLM_API_KEY=replace-with-your-provider-key
+
+# --- Primary path (defaults shown) -------------------------------------------
+#LLM_BASE_URL=https://api.anthropic.com/v1
+#LLM_MODEL=claude-sonnet-5
+
+# Token-less enrollment and App Store routes remain disabled unless explicitly opted in.
+APP_STORE_ENABLED=false
+FREE_COLD_ENROLLMENT_ENABLED=false
+TRANSCRIPT_CONTENT_LOGGING=false
+
+# --- Fallback leg (optional; inert unless FALLBACK_PROVIDER + key are set) ----
+#FALLBACK_PROVIDER=openrouter
+#FALLBACK_MODEL=openai/gpt-oss-120b
+#FALLBACK_KEY_ENV=OPENROUTER_API_KEY
+#OPENROUTER_API_KEY=replace-with-your-openrouter-key
+#FALLBACK_BASE_URL=https://openrouter.ai/api/v1
+#FALLBACK_TIMEOUT_MS=15000
+#FALLBACK_RATE_USD_PER_M=0.5
+
+# --- Hosted paid tier (optional; only affects sessions with an owning user) ---
+#HOSTED_PAID_MODEL=claude-haiku-4-5-20251001
+#HOSTED_PAID_PROVIDER=openrouter
+#HOSTED_PAID_BASE_URL=https://api.openai.com/v1
+#HOSTED_PAID_KEY_ENV=OPENAI_API_KEY
+#OPENAI_API_KEY=replace-with-your-openai-key
+#STRIPE_SECRET_KEY=
+#STRIPE_WEBHOOK_SECRET=
+#STRIPE_PRICE_ANNUAL=
+#STRIPE_PRICE_MONTHLY=
+#LANDING_BASE_URL=
+#TRIAL_SIGNING_PRIVATE_KEY=
+#PLAN_REVENUE_USD_PER_MONTH={"annual":1.85,"monthly":4.24}
+
+# --- App Store routes (require APP_STORE_ENABLED=true) ------------------------
+#APPLE_BUNDLE_IDS=com.example.cyrano
+#APPLE_ENVIRONMENT=Sandbox
+
+# --- Shadow price testing (optional; adds egress and spend) -------------------
+#PRICE_TEST_ENABLED=false
+#PRICE_TEST_SAMPLE_RATE=1
+#PRICE_TEST_TARGETS=[]
