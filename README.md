@@ -77,7 +77,7 @@ Layout:
 
 ## Bring your own key
 
-A client may send `llm_api_key` (with `llm_provider` `anthropic`, `openrouter` or `openai`, and an `llm_model` — required for the latter two) in its session `hello`. That session then runs on the user's key and the user's provider; the operator's `LLM_API_KEY` is not touched, usage is counted but not priced, and the operator's fallback leg is never applied. The key is held in the Durable Object's memory for the connection and is cleared on the next `hello` that omits it.
+A client may send `llm_api_key` (with `llm_provider` `anthropic`, `openrouter` or `openai`, and an `llm_model` — required for the latter two; a request that omits it is refused with `llm_model_required` rather than run on a guessed model) in its session `hello`. That session then runs on the user's key and the user's provider; the operator's `LLM_API_KEY` is not touched, usage is counted but not priced, and the operator's fallback leg is never applied. The key is held in the Durable Object's memory for the connection and is cleared on the next `hello` that omits it.
 
 ## Configuration reference
 

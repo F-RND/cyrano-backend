@@ -5,7 +5,7 @@ import type { Env } from "./env.js";
 import type { Identity } from "./auth.js";
 import { forwardWithAgent, forwardWithIdentity, resolveAgentAuth, resolveIdentity } from "./auth.js";
 import { pingLlm, type LlmConfig } from "./llm/client.js";
-import { resolveAnalysisLlmConfig, resolveStatelessLlmConfig } from "./llm/hosted-config.js";
+import { resolveAnalysisLlmConfig, resolveStatelessLlmConfig, ClientLlmSelectionError } from "./llm/hosted-config.js";
 import { createSpendLedger, isEmptyDelta, spendDeltaToWire } from "./llm/spend.js";
 import { pricingOptionsFromEnv } from "./llm/pricing.js";
 import type { UsageDelta } from "./usage.js";
@@ -672,7 +672,13 @@ export default {
       // The resolution itself lives in llm/hosted-config.ts so the I3 verdict
       // it passes to fallbackLegFor is directly testable — see the file header.
       const ledger = createSpendLedger(pricingOptionsFromEnv(env));
-      const config: LlmConfig = resolveAnalysisLlmConfig(env, body, identity, ledger);
+      let config: LlmConfig;
+      try {
+        config = resolveAnalysisLlmConfig(env, body, identity, ledger);
+      } catch (e) {
+        if (e instanceof ClientLlmSelectionError) return Response.json({ error: e.code }, { status: 400 });
+        throw e;
+      }
 
       const outcome = await reanalyzeTranscript(config, lines);
 
@@ -758,7 +764,13 @@ export default {
       // Resolve provider/key/model exactly as /analyze does — the same function,
       // which is the point: one place decides the I3 verdict for both routes.
       const ledger = createSpendLedger(pricingOptionsFromEnv(env));
-      const config: LlmConfig = resolveAnalysisLlmConfig(env, body, identity, ledger);
+      let config: LlmConfig;
+      try {
+        config = resolveAnalysisLlmConfig(env, body, identity, ledger);
+      } catch (e) {
+        if (e instanceof ClientLlmSelectionError) return Response.json({ error: e.code }, { status: 400 });
+        throw e;
+      }
 
       let answer: string;
       try {

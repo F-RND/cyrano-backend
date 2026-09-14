@@ -164,9 +164,11 @@ export interface ClientHelloMessage {
   /**
    * Model id for a client-supplied key. Required for OpenRouter (e.g.
    * "anthropic/claude-3.5-sonnet", "openai/gpt-4o-mini",
-   * "google/gemini-2.0-flash-001") and for OpenAI (e.g. "gpt-5.6-luna");
-   * optional for Anthropic BYOK (falls back to the server's LLM_MODEL).
-   * Ignored on the hosted path. */
+   * "google/gemini-2.0-flash-001") and for OpenAI (e.g. "gpt-5.6-luna") —
+   * the server refuses such a key without one (analysis status `llm_error`
+   * on a session, 400 `llm_model_required` on /analyze and /ask) rather than
+   * guessing; optional for Anthropic BYOK (falls back to the server's
+   * LLM_MODEL). Ignored on the hosted path. */
   llm_model?: string;
   /**
    * What kind of session this is: "burst" (a short dictation-companion
