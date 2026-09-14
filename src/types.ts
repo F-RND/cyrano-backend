@@ -154,15 +154,19 @@ export interface ClientHelloMessage {
    * Which provider `llm_api_key` is for (added 2026-07-13, BYOK breadth —
    * the hosted-provider contract). "anthropic" (default) speaks the native
    * Messages API; "openrouter" speaks the OpenAI-compatible Chat Completions
-   * API at openrouter.ai. Ignored when no client key is sent (the hosted path
-   * speaks whatever the operator's LLM_PROVIDER names). In-memory only,
-   * re-sent each hello like llm_api_key. */
-  llm_provider?: "anthropic" | "openrouter";
+   * API at openrouter.ai; "openai" (added 2026-09-14) speaks the same API at
+   * api.openai.com. Additive: a backend that predates "openai" treats it as
+   * "anthropic" and the key is rejected with the existing auth_error status.
+   * Ignored when no client key is sent (the hosted path speaks whatever the
+   * operator's LLM_PROVIDER names). In-memory only, re-sent each hello like
+   * llm_api_key. */
+  llm_provider?: "anthropic" | "openrouter" | "openai";
   /**
    * Model id for a client-supplied key. Required for OpenRouter (e.g.
    * "anthropic/claude-3.5-sonnet", "openai/gpt-4o-mini",
-   * "google/gemini-2.0-flash-001"); optional for Anthropic BYOK (falls back to
-   * the server's LLM_MODEL). Ignored on the hosted path. */
+   * "google/gemini-2.0-flash-001") and for OpenAI (e.g. "gpt-5.6-luna");
+   * optional for Anthropic BYOK (falls back to the server's LLM_MODEL).
+   * Ignored on the hosted path. */
   llm_model?: string;
   /**
    * What kind of session this is: "burst" (a short dictation-companion

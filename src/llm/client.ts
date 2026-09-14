@@ -30,6 +30,22 @@ export type LlmProvider = "anthropic" | "openrouter";
  * defaults to it (LLM_BASE_URL is used verbatim — see env.ts LLM_PROVIDER). */
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
+/** OpenAI's own root. The base URL for a BYOK "openai" selection: same wire
+ * as "openrouter", different company — which is exactly why the client has a
+ * separate value for it (an OpenAI key sent to openrouter.ai just 401s). */
+export const OPENAI_BASE_URL = "https://api.openai.com/v1";
+
+/**
+ * What a CLIENT may put in `hello.llm_provider` / an `llm_provider` body
+ * field beside its own key. Unlike the operator tags (`LlmProvider`, parsed by
+ * asProvider), these name a destination, not just a wire: "openai" and
+ * "openrouter" both speak Chat Completions but at different hosts, and the
+ * server — not the client — owns the base URL for each. Resolved to a leg by
+ * llm/hosted-config.ts clientLeg(); anything unrecognised is treated as
+ * "anthropic", as it always was.
+ */
+export type ClientLlmProvider = "anthropic" | "openrouter" | "openai";
+
 /** True for providers that speak OpenAI-compatible Chat Completions rather than
  * the native Anthropic Messages API. */
 export function isOpenAiCompat(provider: LlmProvider | undefined): boolean {
