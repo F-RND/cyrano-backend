@@ -43,6 +43,7 @@ import {
   usageMicrosAt,
   type LlmProvider,
   type LlmUsage,
+  asProvider,
 } from "./client.js";
 import type { Env } from "../env.js";
 
@@ -412,9 +413,11 @@ export function pricingOptionsFromEnv(
   const configuredFlatPerM: Partial<Record<BillingProvider, number>> = {};
 
   const fallbackRate = positiveNumber(env.FALLBACK_RATE_USD_PER_M);
-  if (fallbackRate !== undefined && env.FALLBACK_PROVIDER) {
-    const tag = env.FALLBACK_PROVIDER;
-    if (tag === "anthropic" || tag === "openrouter") {
+  if (fallbackRate !== undefined) {
+    // Same parser as fallbackLegFor, so an alias the leg accepts ("openai")
+    // prices the same account the leg bills.
+    const tag = asProvider(env.FALLBACK_PROVIDER);
+    if (tag) {
       // Resolve the same way a served leg will, so the configured rate lands on
       // the account the leg actually bills rather than on the wire-protocol tag.
       // The base-URL defaults mirror env.ts's FALLBACK_DEFAULTS: a deployment

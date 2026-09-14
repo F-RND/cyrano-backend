@@ -21,7 +21,7 @@
 
 import type { Env } from "../env.js";
 import { transcriptContentLoggingEnabled } from "../env.js";
-import { type LlmConfig, type LlmUsage, type LlmProvider, type ServedLeg } from "../llm/client.js";
+import { asProvider, type LlmConfig, type LlmUsage, type LlmProvider, type ServedLeg } from "../llm/client.js";
 import {
   billingProviderFor,
   priceUsage,
@@ -102,10 +102,6 @@ export function priceTestSampleRate(env: Env): number {
   return Number.isFinite(r) ? Math.max(0, Math.min(1, r)) : 1;
 }
 
-/** Every wire protocol the client speaks. */
-function isProvider(v: unknown): v is LlmProvider {
-  return v === "anthropic" || v === "openrouter";
-}
 
 /** Parse and validate PRICE_TEST_TARGETS. Malformed entries are dropped with a
  * log line rather than failing the session — a bad target must never break a
@@ -133,9 +129,11 @@ export function parsePriceTargets(env: Env): PriceTarget[] {
     // side of the call at zero, which is worse than having no rate at all.
     const hasInput = typeof o.inputPerM === "number" && Number.isFinite(o.inputPerM) && o.inputPerM >= 0;
     const hasOutput = typeof o.outputPerM === "number" && Number.isFinite(o.outputPerM) && o.outputPerM >= 0;
+    // Operator-supplied, so the same parser (and "openai" alias) as the env tags.
+    const provider = asProvider(o.provider);
     if (
       typeof o.label !== "string" ||
-      !isProvider(o.provider) ||
+      provider === undefined ||
       typeof o.baseUrl !== "string" ||
       typeof o.model !== "string" ||
       typeof o.keyEnv !== "string" ||
@@ -151,7 +149,7 @@ export function parsePriceTargets(env: Env): PriceTarget[] {
     seen.add(o.label);
     out.push({
       label: o.label,
-      provider: o.provider,
+      provider,
       baseUrl: o.baseUrl,
       model: o.model,
       keyEnv: o.keyEnv,

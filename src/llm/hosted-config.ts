@@ -33,7 +33,7 @@
 import type { Env } from "../env.js";
 import { fallbackLegFor, transcriptContentLoggingEnabled } from "../env.js";
 import type { Identity } from "../auth.js";
-import { OPENROUTER_BASE_URL, type LlmConfig } from "./client.js";
+import { OPENROUTER_BASE_URL, asProvider, type LlmConfig, type LlmProvider } from "./client.js";
 import type { SpendLedger } from "./spend.js";
 
 /**
@@ -50,6 +50,27 @@ export function namedEnvKey(env: Env, keyEnv: string): string | undefined {
   if (!Object.hasOwn(env as object, keyEnv)) return undefined;
   const v = (env as unknown as Record<string, unknown>)[keyEnv];
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/**
+ * The PRIMARY leg: what an operator / self-host session — and, on the
+ * stateless routes, every non-owned identity — runs on. LLM_API_KEY at
+ * LLM_BASE_URL, speaking whatever LLM_PROVIDER names (default native
+ * Anthropic). The ONLY place that env triple is turned into a leg, so the
+ * WebSocket path (SessionDO.hostedLeg) and the HTTP path
+ * (resolveAnalysisLlmConfig) cannot disagree about which wire they speak.
+ *
+ * `baseUrl` is LLM_BASE_URL verbatim for every provider: unlike the fallback
+ * and BYOK legs there is no per-provider default here, because the operator
+ * chose the URL deliberately and a tag must not redirect it (env.ts).
+ */
+export function primaryLeg(env: Env): { provider: LlmProvider; baseUrl: string; apiKey: string; model: string } {
+  return {
+    provider: asProvider(env.LLM_PROVIDER) ?? "anthropic",
+    baseUrl: env.LLM_BASE_URL,
+    apiKey: env.LLM_API_KEY,
+    model: env.LLM_MODEL,
+  };
 }
 
 /** The BYOK fields a client may put in an /analyze or /ask body. */
@@ -79,18 +100,19 @@ export function resolveAnalysisLlmConfig(
   const clientKey = body?.llm_api_key;
   if (!clientKey) {
     const owned = identity.kind === "user" && Boolean(env.HOSTED_PAID_MODEL);
-    const model = owned ? env.HOSTED_PAID_MODEL! : env.LLM_MODEL;
-    const openrouter = owned && env.HOSTED_PAID_PROVIDER === "openrouter";
+    const primary = primaryLeg(env);
+    const model = owned ? env.HOSTED_PAID_MODEL! : primary.model;
+    const openrouter = owned && asProvider(env.HOSTED_PAID_PROVIDER) === "openrouter";
     const keyEnv = env.HOSTED_PAID_KEY_ENV ?? "LLM_API_KEY";
     return {
-      provider: openrouter ? "openrouter" : "anthropic",
-      baseUrl: openrouter ? (env.HOSTED_PAID_BASE_URL ?? OPENROUTER_BASE_URL) : env.LLM_BASE_URL,
+      provider: openrouter ? "openrouter" : primary.provider,
+      baseUrl: openrouter ? (env.HOSTED_PAID_BASE_URL ?? OPENROUTER_BASE_URL) : primary.baseUrl,
       // `typeof … === "string"` and not `??`: `keyEnv` is operator-supplied, so
       // HOSTED_PAID_KEY_ENV="constructor" (or any Object.prototype name)
       // resolves to an inherited FUNCTION, which is non-nullish — `??` would
       // never fall through and a function would be sent as the API key. env.ts
       // guards its own key lookup exactly this way; this one did not.
-      apiKey: openrouter ? namedEnvKey(env, keyEnv) ?? env.LLM_API_KEY : env.LLM_API_KEY,
+      apiKey: openrouter ? namedEnvKey(env, keyEnv) ?? primary.apiKey : primary.apiKey,
       model,
       logContent: transcriptContentLoggingEnabled(env),
       fallback: fallbackLegFor(env, { usingClientKey: false }),

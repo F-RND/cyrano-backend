@@ -4,6 +4,7 @@
 import {
   FALLBACK_TIMEOUT_MS,
   OPENROUTER_BASE_URL,
+  asProvider,
   type FallbackLeg,
   type LlmProvider,
 } from "./llm/client.js";
@@ -19,10 +20,20 @@ export interface Env {
   // Secrets — set with `wrangler secret put`, never committed.
   AUTH_TOKEN: string;
   LLM_API_KEY: string;
-  // Vars — see wrangler.jsonc. LLM_BASE_URL is an Anthropic-compatible /v1
-  // root (the client speaks the native Messages API as of 2026-07-11).
+  // Vars — see wrangler.jsonc. LLM_BASE_URL is the /v1 root of whichever
+  // provider LLM_PROVIDER names.
   LLM_BASE_URL: string;
   LLM_MODEL: string;
+  // Which wire protocol the primary path speaks to LLM_BASE_URL with LLM_API_KEY.
+  // "anthropic" (default; native Messages API) or "openrouter" (OpenAI-
+  // compatible Chat Completions — OpenAI itself, OpenRouter, or any compatible
+  // server; "openai" is accepted as an alias). The tag names the wire, not a
+  // company: an operator choosing "openrouter" sets LLM_BASE_URL to the
+  // endpoint they mean (https://api.openai.com/v1, https://openrouter.ai/api/v1,
+  // …) themselves. There is deliberately no per-provider base-URL default on
+  // the primary path — the operator set the URL once, on purpose, and a tag
+  // must never silently redirect it. Unset/unknown → "anthropic".
+  LLM_PROVIDER?: string;
 
   // --- Free 3-day Pro trial (src/trial.ts) ---
   // Base64 (PKCS8 DER) of the Ed25519 private key the Worker signs trial tokens
@@ -175,10 +186,6 @@ const FALLBACK_DEFAULTS: Partial<Record<LlmProvider, { baseUrl?: string; model?:
   openrouter: { baseUrl: OPENROUTER_BASE_URL },
   anthropic: {},
 };
-
-function asProvider(raw: string | undefined): LlmProvider | undefined {
-  return raw === "anthropic" || raw === "openrouter" ? raw : undefined;
-}
 
 /**
  * THE ONLY PLACE AN `LlmConfig.fallback` MAY BE BUILT.
