@@ -21,7 +21,7 @@
 // Every micro-dollar below is derived by hand from the rate card or from the
 // UsageState literal above it, never from running the implementation.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_COST_ROWS,
   DEFAULT_PLAN_REVENUE_USD_PER_MONTH,
@@ -740,6 +740,18 @@ async function costs(registry: RegistryDO, query = ""): Promise<any> {
 }
 
 describe("RegistryDO /_costs: a bounded, resumable scan", () => {
+  // The DO reads the wall clock, and the fixtures' `periodStart` (NOW - 5 days)
+  // is a fixed date: once USAGE_PERIOD_MS elapsed past it in real time, every
+  // period-to-date figure rolled to zero and this block failed on its own.
+  // Pin the clock to the fixtures' NOW so the assertions describe the code,
+  // not the calendar.
+  beforeEach(() => {
+    vi.useFakeTimers({ now: NOW, toFake: ["Date"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("ranks by cost, totals over everything SCANNED, and reports the bound honestly", async () => {
     const { registry, storage } = makeRegistry();
     // 5 subjects, ascending cost. Keys are `user:<label>` and the scan walks
