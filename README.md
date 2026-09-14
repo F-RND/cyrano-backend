@@ -33,7 +33,7 @@ Stateless HTTP routes cover everything that does not need a live session: `/anal
 You need Node.js 22.12+, a Cloudflare account with Workers and Durable Objects, and an Anthropic API key.
 
 ```sh
-git clone https://github.com/johnathan-greenaway/cyrano-backend.git
+git clone https://github.com/F-RND/cyrano-backend.git
 cd cyrano-backend
 npm ci
 npm run typecheck && npm test      # runs offline, no API key needed

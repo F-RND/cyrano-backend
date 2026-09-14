@@ -7,12 +7,12 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/johnathan-greenaway/cyrano-backend.git"
+    "url": "git+https://github.com/F-RND/cyrano-backend.git"
   },
   "bugs": {
-    "url": "https://github.com/johnathan-greenaway/cyrano-backend/security/advisories/new"
+    "url": "https://github.com/F-RND/cyrano-backend/security/advisories/new"
   },
-  "homepage": "https://github.com/johnathan-greenaway/cyrano-backend#readme",
+  "homepage": "https://github.com/F-RND/cyrano-backend#readme",
   "engines": {
     "node": ">=22.12"
   },
