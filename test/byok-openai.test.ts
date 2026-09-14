@@ -20,7 +20,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OPENAI_BASE_URL, OPENROUTER_BASE_URL, callTool, type ToolSchema } from "../src/llm/client.js";
-import { clientLeg, resolveAnalysisLlmConfig } from "../src/llm/hosted-config.js";
+import { ClientLlmSelectionError, clientLeg, resolveAnalysisLlmConfig } from "../src/llm/hosted-config.js";
 import { createSpendLedger } from "../src/llm/spend.js";
 import { sessionLlmConfig } from "../src/session-do.js";
 import { fallbackLegFor } from "../src/env.js";
@@ -117,5 +117,52 @@ describe("an OpenAI key on the wire, from both client paths", () => {
   it("an old client that never sends llm_provider still gets Anthropic at the operator's URL", () => {
     const config = sessionLlmConfig(env, { apiKey: CLIENT_KEY, provider: null, model: null }, hostedLeg, meters());
     expect(config).toMatchObject({ provider: "anthropic", baseUrl: "https://gateway.example/anthropic/v1", model: env.LLM_MODEL });
+  });
+});
+
+describe("an OpenAI-compatible client key MUST name its model", () => {
+  // Without this, an omitted llm_model fell back to the operator's LLM_MODEL
+  // (claude-sonnet-5 by default) and went to /chat/completions on the user's
+  // own bill — a confusing provider-side 4xx instead of a clear refusal.
+  it("/analyze + /ask: refused before any request, with the wire code", () => {
+    for (const llm_provider of ["openai", "openrouter"]) {
+      expect(() => resolveAnalysisLlmConfig(env, { llm_api_key: CLIENT_KEY, llm_provider }, user, createSpendLedger()))
+        .toThrow(ClientLlmSelectionError);
+      try {
+        resolveAnalysisLlmConfig(env, { llm_api_key: CLIENT_KEY, llm_provider, llm_model: "  " }, user, createSpendLedger());
+      } catch (e) {
+        expect((e as ClientLlmSelectionError).code).toBe("llm_model_required");
+      }
+    }
+  });
+
+  it("session path: the same refusal from sessionLlmConfig", () => {
+    expect(() => sessionLlmConfig(env, { apiKey: CLIENT_KEY, provider: "openai", model: null }, hostedLeg, meters()))
+      .toThrow(ClientLlmSelectionError);
+  });
+
+  it("an Anthropic client key still defaults to the operator's model, exactly as before", () => {
+    expect(resolveAnalysisLlmConfig(env, { llm_api_key: CLIENT_KEY }, user, createSpendLedger()))
+      .toMatchObject({ provider: "anthropic", model: env.LLM_MODEL });
+    expect(sessionLlmConfig(env, { apiKey: CLIENT_KEY, provider: null, model: null }, hostedLeg, meters()))
+      .toMatchObject({ provider: "anthropic", model: hostedLeg.model });
+  });
+
+  it("the HTTP routes answer 400 {error: llm_model_required}", async () => {
+    const { default: worker } = await import("../src/index.js");
+    const registry = { get: () => ({ fetch: async () => Response.json({ ok: true }) }), idFromName: () => "r" };
+    const httpEnv = { ...env, AUTH_TOKEN: "t", REGISTRY_DO: registry } as unknown as Env;
+    for (const path of ["/analyze", "/ask"]) {
+      const res = await worker.fetch(
+        new Request(`https://worker.example${path}`, {
+          method: "POST",
+          headers: { authorization: "Bearer t", "content-type": "application/json" },
+          body: JSON.stringify({ transcript: [{ seq: 1, speaker: "USER", text: "hi" }], question: "q", llm_api_key: CLIENT_KEY, llm_provider: "openai" }),
+        }),
+        httpEnv,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "llm_model_required" });
+    }
   });
 });

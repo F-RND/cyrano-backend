@@ -3,7 +3,7 @@
 
 import type { Env } from "./env.js";
 import { fallbackLegFor, transcriptContentLoggingEnabled } from "./env.js";
-import { clientLeg, primaryLeg } from "./llm/hosted-config.js";
+import { ClientLlmSelectionError, clientSelection, primaryLeg } from "./llm/hosted-config.js";
 import { agentLabelFromUrl, identityFromUrl, sessionAccessAllowed, type Identity } from "./auth.js";
 import {
   isRetentionTier,
@@ -381,9 +381,8 @@ export function sessionLlmConfig(
 ): LlmConfig {
   if (client.apiKey) {
     return {
-      ...clientLeg(env, client.provider),
+      ...clientSelection(env, client.provider, client.model, hosted.model),
       apiKey: client.apiKey,
-      model: client.model ?? hosted.model,
       logContent: transcriptContentLoggingEnabled(env),
       // Asked explicitly, and always undefined: a BYOK call must never be
       // failed over onto our key at a provider the user did not choose
@@ -931,6 +930,14 @@ export class SessionDO implements DurableObject {
     if (!this.hasUsableLlmKey()) {
       await consumeWindow();
       this.broadcastStatusOnlyResult(meta.session_id, this.noLlmKeyStatus(), newCursor);
+      return;
+    }
+    // Same terminal shape for a client key the server cannot honour (an
+    // OpenAI-compatible key with no model): it needs a new hello, not a retry.
+    const selectionError = this.clientSelectionError();
+    if (selectionError) {
+      await consumeWindow();
+      this.broadcastStatusOnlyResult(meta.session_id, selectionError, newCursor);
       return;
     }
 
@@ -2346,6 +2353,20 @@ export class SessionDO implements DurableObject {
       };
     }
     return { ...primaryLeg(this.env), model: this.hostedModel() };
+  }
+
+  /** The status for a BYOK selection `sessionLlmConfig` would refuse, or null
+   * when the selection is usable. Checked before analysis so the refusal is a
+   * status on the wire rather than an exception inside the analysis tick. */
+  private clientSelectionError(): AnalysisStatusInfo | null {
+    if (!this.clientLlmApiKey) return null;
+    try {
+      clientSelection(this.env, this.clientLlmProvider, this.clientLlmModel, this.hostedModel());
+      return null;
+    } catch (e) {
+      if (e instanceof ClientLlmSelectionError) return { state: "llm_error", detail: e.message };
+      throw e;
+    }
   }
 
   private noLlmKeyStatus(): AnalysisStatusInfo {

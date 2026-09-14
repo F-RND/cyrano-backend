@@ -102,6 +102,45 @@ export function clientLeg(env: Env, raw: unknown): { provider: LlmProvider; base
   return { provider: "anthropic", baseUrl: env.LLM_BASE_URL };
 }
 
+/** A client-supplied selection the server cannot honour. `code` is the wire
+ * value: the HTTP routes return it as `{error: code}` with 400, the session
+ * path as an `llm_error` status detail. */
+export class ClientLlmSelectionError extends Error {
+  constructor(public readonly code: "llm_model_required", message: string) {
+    super(message);
+    this.name = "ClientLlmSelectionError";
+  }
+}
+
+/**
+ * clientLeg() plus the model, with the one rule the contract states: an
+ * OpenAI-compatible client key (openrouter / openai) MUST name its model.
+ * Falling back to the operator's LLM_MODEL there would send an Anthropic
+ * model id to /chat/completions — a confusing provider-side 4xx on the
+ * user's own bill, instead of a clear refusal here. Anthropic BYOK keeps
+ * its long-standing default (the operator's model), unchanged.
+ *
+ * `fallbackModel` is what an Anthropic client key runs when it names none:
+ * env.LLM_MODEL on the HTTP routes, the hosted leg's model in a session.
+ */
+export function clientSelection(
+  env: Env,
+  raw: unknown,
+  model: string | null | undefined,
+  fallbackModel: string,
+): { provider: LlmProvider; baseUrl: string; model: string } {
+  const leg = clientLeg(env, raw);
+  const named = (model ?? "").trim();
+  if (named) return { ...leg, model: named };
+  if (leg.provider === "openrouter") {
+    throw new ClientLlmSelectionError(
+      "llm_model_required",
+      `llm_model is required with llm_provider "${String(raw)}" — there is no server-side default model for an OpenAI-compatible key.`,
+    );
+  }
+  return { ...leg, model: fallbackModel };
+}
+
 /** The BYOK fields a client may put in an /analyze or /ask body. */
 export interface ClientLlmSelection {
   llm_api_key?: string;
@@ -153,9 +192,8 @@ export function resolveAnalysisLlmConfig(
     };
   }
   return {
-    ...clientLeg(env, body?.llm_provider),
+    ...clientSelection(env, body?.llm_provider, body?.llm_model, env.LLM_MODEL),
     apiKey: clientKey,
-    model: body?.llm_model || env.LLM_MODEL,
     logContent: transcriptContentLoggingEnabled(env),
     // Always undefined — a BYOK call is never failed over onto our key
     // (BAR invariant I3). Stated, not omitted, so the rule is visible here.
