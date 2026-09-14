@@ -50,6 +50,7 @@ import {
   MAX_COST_SCAN,
   type CostReport,
 } from "./costs.js";
+import { appleSubscriptionId, appleUserLabel } from "./appstore.js";
 import type { Env } from "./env.js";
 
 interface StoredKey {
@@ -1704,10 +1705,22 @@ export class RegistryDO implements DurableObject {
    * Apple's notifications write through — finds this record with no new index
    * and no changes to putUser/revokeUser. The field name is Stripe's; the index
    * it feeds is not.
+   *
+   * Both the id and the label are namespaced by Apple's environment
+   * (appstore.ts owns the rule, so the two can never drift apart). A sandbox
+   * purchase — TestFlight, App Review, any sandbox tester — therefore lands on
+   * its OWN identity: separately countable, separately revocable, and priced
+   * at zero by the cost report instead of at the plan's list price. Sandbox
+   * transaction ids are also minted from a different sequence to production
+   * ones and nothing promises the two never coincide, which matters more here
+   * than anywhere else because this route ROTATES: an unnamespaced collision
+   * would hand a paying customer's tenant a new token and 401 every device
+   * they own.
    */
   private async appStoreLink(request: Request): Promise<Response> {
     const b = (await request.json().catch(() => ({}))) as {
       original_transaction_id?: string;
+      environment?: string;
       plan?: string;
       sub_status?: string;
       period_start?: number;
@@ -1718,8 +1731,12 @@ export class RegistryDO implements DurableObject {
       return Response.json({ error: "missing_transaction_id" }, { status: 400 });
     }
 
-    const subscriptionId = `apple:${originalTransactionId}`;
-    const label = `apple_${originalTransactionId}`;
+    // The caller has already verified the environment against the deployment's
+    // allow-list; an absent one can only be a caller that predates the field,
+    // and defaulting it to Production preserves that caller's identities.
+    const environment = b.environment?.trim() || "Production";
+    const subscriptionId = appleSubscriptionId(originalTransactionId, environment);
+    const label = appleUserLabel(originalTransactionId, environment);
     // Prepared outside the transaction: Web Crypto is external async work, the
     // same rule provisionSubscriber and relayTokenForLicense follow.
     const token = randomToken("cyrano_user");

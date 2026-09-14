@@ -128,6 +128,35 @@ describe("registry _appstore_link", () => {
     expect(await res.json()).toMatchObject({ error: "missing_transaction_id" });
   });
 
+  it("keeps a sandbox purchase off the paying subscriber's identity", async () => {
+    // TestFlight, App Review and any sandbox tester share the production
+    // originalTransactionId space, and this route ROTATES. Without the split,
+    // a reviewer's link would hand a real customer's tenant a new token and
+    // silently 401 every device they own.
+    const { registry: reg, storage } = registry();
+    const paid = (await (
+      await reg.fetch(link({ original_transaction_id: OTID, environment: "Production", plan: "annual" }))
+    ).json()) as { token: string; user_id: string };
+    const sandbox = (await (
+      await reg.fetch(link({ original_transaction_id: OTID, environment: "Sandbox", plan: "monthly" }))
+    ).json()) as { token: string; user_id: string; rotated: boolean };
+
+    expect(sandbox.rotated).toBe(false);
+    expect(sandbox.user_id).not.toBe(paid.user_id);
+    // The paying customer's token still resolves, to the paying identity.
+    expect(storage.map.get(`user-hash:${await sha256Hex(paid.token)}`)).toBe(LABEL);
+    expect(storage.map.get(`user:${LABEL}`)).toMatchObject({ plan: "annual" });
+    // And the sandbox tenant is a separate record under a separate index key.
+    expect(storage.map.get(`user-subscription:apple:sandbox:${OTID}`)).toBe(`apple_sandbox_${OTID}`);
+    expect(storage.map.get(`user:apple_sandbox_${OTID}`)).toMatchObject({ plan: "monthly" });
+  });
+
+  it("defaults a body with no environment to the production namespace", async () => {
+    const { registry: reg, storage } = registry();
+    await reg.fetch(link({ original_transaction_id: OTID, plan: "monthly" }));
+    expect(storage.map.get(`user-subscription:apple:${OTID}`)).toBe(LABEL);
+  });
+
   it("keeps Apple and Stripe records separate in the shared subscription index", async () => {
     // The namespaced id is what stops an Apple originalTransactionId from ever
     // resolving to a Stripe subscription's tenant, or vice versa.
