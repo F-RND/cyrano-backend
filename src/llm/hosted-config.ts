@@ -33,7 +33,13 @@
 import type { Env } from "../env.js";
 import { fallbackLegFor, transcriptContentLoggingEnabled } from "../env.js";
 import type { Identity } from "../auth.js";
-import { OPENROUTER_BASE_URL, asProvider, type LlmConfig, type LlmProvider } from "./client.js";
+import {
+  OPENAI_BASE_URL,
+  OPENROUTER_BASE_URL,
+  asProvider,
+  type LlmConfig,
+  type LlmProvider,
+} from "./client.js";
 import type { SpendLedger } from "./spend.js";
 
 /**
@@ -71,6 +77,29 @@ export function primaryLeg(env: Env): { provider: LlmProvider; baseUrl: string; 
     apiKey: env.LLM_API_KEY,
     model: env.LLM_MODEL,
   };
+}
+
+/**
+ * The wire and host a CLIENT-supplied key is sent to, from the client's
+ * `llm_provider` value. The counterpart of primaryLeg() for the BYOK branch,
+ * and the ONLY place a client tag becomes a base URL, so the WebSocket path
+ * (sessionLlmConfig) and the HTTP routes (below) cannot disagree.
+ *
+ *   "anthropic"  → native Messages API at the operator's LLM_BASE_URL (which
+ *                  is Anthropic's root unless the operator moved it — a BYOK
+ *                  Anthropic key follows the operator's gateway, as it always
+ *                  has, so a deployment on an AI Gateway keeps working);
+ *   "openrouter" → Chat Completions at openrouter.ai;
+ *   "openai"     → Chat Completions at api.openai.com.
+ *
+ * Anything else (older clients, typos) is "anthropic", unchanged. Deliberately
+ * not asProvider(): that parser's "openai" alias means the WIRE, and applying
+ * it here would send an OpenAI key to OpenRouter.
+ */
+export function clientLeg(env: Env, raw: unknown): { provider: LlmProvider; baseUrl: string } {
+  if (raw === "openrouter") return { provider: "openrouter", baseUrl: OPENROUTER_BASE_URL };
+  if (raw === "openai") return { provider: "openrouter", baseUrl: OPENAI_BASE_URL };
+  return { provider: "anthropic", baseUrl: env.LLM_BASE_URL };
 }
 
 /** The BYOK fields a client may put in an /analyze or /ask body. */
@@ -123,10 +152,8 @@ export function resolveAnalysisLlmConfig(
       onUsage: (usage, leg) => ledger.recordServed(usage, leg),
     };
   }
-  const provider = body?.llm_provider === "openrouter" ? "openrouter" : "anthropic";
   return {
-    provider,
-    baseUrl: provider === "openrouter" ? OPENROUTER_BASE_URL : env.LLM_BASE_URL,
+    ...clientLeg(env, body?.llm_provider),
     apiKey: clientKey,
     model: body?.llm_model || env.LLM_MODEL,
     logContent: transcriptContentLoggingEnabled(env),

@@ -77,7 +77,7 @@ Layout:
 
 ## Bring your own key
 
-A client may send `llm_api_key` (with `llm_provider` `anthropic` or `openrouter` and an optional `llm_model`) in its session `hello`. That session then runs on the user's key and the user's provider; the operator's `LLM_API_KEY` is not touched, usage is counted but not priced, and the operator's fallback leg is never applied. The key is held in the Durable Object's memory for the connection and is cleared on the next `hello` that omits it.
+A client may send `llm_api_key` (with `llm_provider` `anthropic`, `openrouter` or `openai`, and an `llm_model` — required for the latter two) in its session `hello`. That session then runs on the user's key and the user's provider; the operator's `LLM_API_KEY` is not touched, usage is counted but not priced, and the operator's fallback leg is never applied. The key is held in the Durable Object's memory for the connection and is cleared on the next `hello` that omits it.
 
 ## Configuration reference
 
@@ -112,7 +112,7 @@ The tag never changes the URL: an operator choosing `openrouter` sets `LLM_BASE_
 npx wrangler secret put LLM_API_KEY      # the OpenAI key
 ```
 
-Cost reporting resolves the billing account from the base URL's host, so an `openrouter`-wire primary pointed at `api.openai.com` prices on the OpenAI rate card without further configuration. The same tag vocabulary applies to the optional groups below (`FALLBACK_PROVIDER`, `HOSTED_PAID_PROVIDER`, price-test targets). Cyrano clients may also bring their own key per session (`hello.llm_api_key` with `llm_provider` `"anthropic"` or `"openrouter"`); a client key is never failed over onto the operator's key.
+Cost reporting resolves the billing account from the base URL's host, so an `openrouter`-wire primary pointed at `api.openai.com` prices on the OpenAI rate card without further configuration. The same tag vocabulary applies to the optional groups below (`FALLBACK_PROVIDER`, `HOSTED_PAID_PROVIDER`, price-test targets). Cyrano clients may also bring their own key per session (`hello.llm_api_key` with `llm_provider` `"anthropic"`, `"openrouter"` or `"openai"` — the client names a destination, and the server owns the base URL for each); a client key is never failed over onto the operator's key.
 
 ### Primary path
 

@@ -3,7 +3,7 @@
 
 import type { Env } from "./env.js";
 import { fallbackLegFor, transcriptContentLoggingEnabled } from "./env.js";
-import { primaryLeg } from "./llm/hosted-config.js";
+import { clientLeg, primaryLeg } from "./llm/hosted-config.js";
 import { agentLabelFromUrl, identityFromUrl, sessionAccessAllowed, type Identity } from "./auth.js";
 import {
   isRetentionTier,
@@ -19,6 +19,7 @@ import {
   type LlmProvider,
   type ServedLeg,
   asProvider,
+  type ClientLlmProvider,
 } from "./llm/client.js";
 import { namedEnvKey } from "./llm/hosted-config.js";
 import {
@@ -202,7 +203,7 @@ interface SessionSocketAttachment {
   runtime?: {
     version: 1;
     clientLlmApiKey: string | null;
-    clientLlmProvider: LlmProvider | null;
+    clientLlmProvider: ClientLlmProvider | null;
     clientLlmModel: string | null;
     sessionOwnerUserId: string | null;
     userEntitled: boolean;
@@ -368,7 +369,7 @@ export function sessionLlmConfig(
   // Nullable, not just optional: the DO stores these as `string | null` after a
   // hibernation wake, and `?? ` must treat "restored as null" exactly like
   // "never set" or a woken BYOK session would silently become a hosted one.
-  client: { apiKey?: string | null; provider?: LlmProvider | null; model?: string | null },
+  client: { apiKey?: string | null; provider?: ClientLlmProvider | null; model?: string | null },
   hosted: { provider: LlmProvider; baseUrl: string; apiKey: string; model: string },
   meters: {
     addUnits: (units: number) => void;
@@ -379,11 +380,9 @@ export function sessionLlmConfig(
   },
 ): LlmConfig {
   if (client.apiKey) {
-    const provider: LlmProvider = client.provider ?? "anthropic";
     return {
-      baseUrl: provider === "openrouter" ? OPENROUTER_BASE_URL : env.LLM_BASE_URL,
+      ...clientLeg(env, client.provider),
       apiKey: client.apiKey,
-      provider,
       model: client.model ?? hosted.model,
       logContent: transcriptContentLoggingEnabled(env),
       // Asked explicitly, and always undefined: a BYOK call must never be
@@ -2254,7 +2253,7 @@ export class SessionDO implements DurableObject {
    * llm_model). Only meaningful when clientLlmApiKey is set; the hosted path
    * runs whatever hostedLeg() resolves (LLM_PROVIDER, or the paid tier's
    * provider). In-memory, re-sent each hello. */
-  private clientLlmProvider: LlmProvider | null = null;
+  private clientLlmProvider: ClientLlmProvider | null = null;
   private clientLlmModel: string | null = null;
 
   /** Cached `owner_user_id` of this session, set at hello. Present ⇒ this is a
