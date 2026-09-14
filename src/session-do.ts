@@ -3,6 +3,7 @@
 
 import type { Env } from "./env.js";
 import { fallbackLegFor, transcriptContentLoggingEnabled } from "./env.js";
+import { primaryLeg } from "./llm/hosted-config.js";
 import { agentLabelFromUrl, identityFromUrl, sessionAccessAllowed, type Identity } from "./auth.js";
 import {
   isRetentionTier,
@@ -17,6 +18,7 @@ import {
   type LlmConfig,
   type LlmProvider,
   type ServedLeg,
+  asProvider,
 } from "./llm/client.js";
 import { namedEnvKey } from "./llm/hosted-config.js";
 import {
@@ -330,7 +332,7 @@ function deriveAnalysisStatus(combined?: PassFailure, custom?: PassFailure): Ana
     return {
       state: "auth_error",
       detail:
-        "The LLM provider rejected the API key (401/403) — check the Anthropic key in Settings, or LLM_API_KEY on the backend.",
+        "The LLM provider rejected the API key (401/403) — check the API key in Settings, or LLM_API_KEY on the backend.",
     };
   }
   if (combined) {
@@ -2250,7 +2252,8 @@ export class SessionDO implements DurableObject {
 
   /** BYOK provider + model for the client key (from hello.llm_provider /
    * llm_model). Only meaningful when clientLlmApiKey is set; the hosted path
-   * is always native Anthropic on env.LLM_MODEL. In-memory, re-sent each hello. */
+   * runs whatever hostedLeg() resolves (LLM_PROVIDER, or the paid tier's
+   * provider). In-memory, re-sent each hello. */
   private clientLlmProvider: LlmProvider | null = null;
   private clientLlmModel: string | null = null;
 
@@ -2323,11 +2326,12 @@ export class SessionDO implements DurableObject {
   /** Provider/endpoint/key for the HOSTED path (our key, no BYOK). Owned paid
    * sessions may run on a non-Anthropic provider — e.g. GPT-5.6 Luna via the
    * OpenAI-compatible endpoint — when HOSTED_PAID_PROVIDER is set; everyone
-   * else stays native Anthropic on env.LLM_BASE_URL/LLM_API_KEY. Model comes
-   * from hostedModel(), so metering and the actual call agree. */
+   * else runs the primary leg (LLM_PROVIDER at LLM_BASE_URL/LLM_API_KEY,
+   * resolved by llm/hosted-config.ts primaryLeg so the HTTP routes agree).
+   * Model comes from hostedModel(), so metering and the actual call agree. */
   private hostedLeg(): { provider: LlmProvider; baseUrl: string; apiKey: string; model: string } {
     const owned = Boolean(this.sessionOwnerUserId && this.env.HOSTED_PAID_MODEL);
-    if (owned && this.env.HOSTED_PAID_PROVIDER === "openrouter") {
+    if (owned && asProvider(this.env.HOSTED_PAID_PROVIDER) === "openrouter") {
       const keyEnv = this.env.HOSTED_PAID_KEY_ENV ?? "LLM_API_KEY";
       // `namedEnvKey` and not a bare index: HOSTED_PAID_KEY_ENV is
       // operator-supplied, and an Object.prototype name resolves to an
@@ -2342,18 +2346,13 @@ export class SessionDO implements DurableObject {
         model: this.hostedModel(),
       };
     }
-    return {
-      provider: "anthropic",
-      baseUrl: this.env.LLM_BASE_URL,
-      apiKey: this.env.LLM_API_KEY,
-      model: this.hostedModel(),
-    };
+    return { ...primaryLeg(this.env), model: this.hostedModel() };
   }
 
   private noLlmKeyStatus(): AnalysisStatusInfo {
     return {
       state: "no_llm_key",
-      detail: "No Anthropic API key is configured for this session — enter one in Settings, or set LLM_API_KEY on the backend.",
+      detail: "No LLM API key is configured for this session — enter one in Settings, or set LLM_API_KEY on the backend.",
     };
   }
 

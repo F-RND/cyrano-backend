@@ -92,20 +92,36 @@ Every value the Worker reads is a string. Boolean flags are opt-in only on the l
 
 ### Which providers the primary path accepts
 
-`LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` configure the primary analysis path, and that path speaks the **native Anthropic Messages API** (`POST {LLM_BASE_URL}/messages`). Accepted values are therefore:
+`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` configure the primary analysis path. `LLM_PROVIDER` names the **wire protocol** the Worker speaks to `LLM_BASE_URL`, not a company:
 
-- an Anthropic API key with the default `LLM_BASE_URL` of `https://api.anthropic.com/v1`; or
-- a key for any endpoint that implements the Anthropic Messages API, with `LLM_BASE_URL` pointed at its `/v1` root (a Cloudflare AI Gateway Anthropic route, a self-hosted proxy, and so on).
+| `LLM_PROVIDER` | Wire | `LLM_BASE_URL` examples |
+| --- | --- | --- |
+| `anthropic` (default) | native Anthropic Messages API (`POST {LLM_BASE_URL}/messages`) | `https://api.anthropic.com/v1`; any endpoint implementing the Messages API — a Cloudflare AI Gateway Anthropic route, a self-hosted proxy |
+| `openrouter` (alias `openai`) | OpenAI-compatible Chat Completions (`POST {LLM_BASE_URL}/chat/completions`) | `https://api.openai.com/v1`; `https://openrouter.ai/api/v1`; any compatible server |
 
-An OpenAI key does not work here. OpenAI-compatible Chat Completions endpoints (OpenAI, OpenRouter, any compatible server) are reachable only through the optional groups below, each of which takes `provider: "openrouter"` — the tag names the wire protocol, not the OpenRouter company. Cyrano clients may also bring their own key per session (`hello.llm_api_key` with `llm_provider` `"anthropic"` or `"openrouter"`); a client key is never failed over onto the operator's key.
+The tag never changes the URL: an operator choosing `openrouter` sets `LLM_BASE_URL` to the endpoint they mean. Running on OpenAI is therefore four settings:
+
+```jsonc
+// wrangler.jsonc → "vars"
+"LLM_PROVIDER": "openrouter",            // or "openai" — same thing
+"LLM_BASE_URL": "https://api.openai.com/v1",
+"LLM_MODEL": "gpt-5.6-luna",
+```
+
+```sh
+npx wrangler secret put LLM_API_KEY      # the OpenAI key
+```
+
+Cost reporting resolves the billing account from the base URL's host, so an `openrouter`-wire primary pointed at `api.openai.com` prices on the OpenAI rate card without further configuration. The same tag vocabulary applies to the optional groups below (`FALLBACK_PROVIDER`, `HOSTED_PAID_PROVIDER`, price-test targets). Cyrano clients may also bring their own key per session (`hello.llm_api_key` with `llm_provider` `"anthropic"` or `"openrouter"`); a client key is never failed over onto the operator's key.
 
 ### Primary path
 
 | Name | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | `AUTH_TOKEN` | secret | — | Required. Bearer token for clients and admin routes. |
-| `LLM_API_KEY` | secret | — | Required. Anthropic-compatible key for the primary path. |
-| `LLM_BASE_URL` | var | `https://api.anthropic.com/v1` | Anthropic Messages API `/v1` root. |
+| `LLM_PROVIDER` | var | `anthropic` | Wire for the primary path: `anthropic` or `openrouter` (`openai` accepted as an alias). Unknown values fall back to `anthropic`. |
+| `LLM_API_KEY` | secret | — | Required. Key for the primary path, at whichever provider `LLM_PROVIDER` names. |
+| `LLM_BASE_URL` | var | `https://api.anthropic.com/v1` | `/v1` root of the primary provider. Never redirected by `LLM_PROVIDER`. |
 | `LLM_MODEL` | var | `claude-sonnet-5` | Model for operator and self-host sessions. |
 | `TRANSCRIPT_CONTENT_LOGGING` | var | `false` | Keep `false`; `true` permits transcript-derived text in logs and exceptions. |
 

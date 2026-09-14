@@ -22,6 +22,11 @@
 
   "vars": {
     "TRANSCRIPT_CONTENT_LOGGING": "false",
+    // Primary path. LLM_PROVIDER is the wire: "anthropic" (native Messages
+    // API) or "openrouter" (OpenAI-compatible Chat Completions — OpenAI,
+    // OpenRouter, or any compatible server; "openai" is an alias). Set
+    // LLM_BASE_URL to match: the tag never redirects the URL.
+    "LLM_PROVIDER": "anthropic",
     "LLM_BASE_URL": "https://api.anthropic.com/v1",
     "LLM_MODEL": "claude-sonnet-5",
     "FALLBACK_PROVIDER": "",

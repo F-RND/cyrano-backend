@@ -155,8 +155,8 @@ export interface ClientHelloMessage {
    * the hosted-provider contract). "anthropic" (default) speaks the native
    * Messages API; "openrouter" speaks the OpenAI-compatible Chat Completions
    * API at openrouter.ai. Ignored when no client key is sent (the hosted path
-   * is always native Anthropic). In-memory only, re-sent each hello like
-   * llm_api_key. */
+   * speaks whatever the operator's LLM_PROVIDER names). In-memory only,
+   * re-sent each hello like llm_api_key. */
   llm_provider?: "anthropic" | "openrouter";
   /**
    * Model id for a client-supplied key. Required for OpenRouter (e.g.

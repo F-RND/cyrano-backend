@@ -6,14 +6,21 @@
 
 # --- Required ---------------------------------------------------------------
 AUTH_TOKEN=replace-with-a-random-local-token
-# Anthropic Messages API key (or a key for an Anthropic-compatible gateway).
-# The primary path does not accept OpenAI keys; see the fallback / hosted
-# groups below for OpenAI-compatible endpoints.
+# API key for the primary path — an Anthropic key by default, or an OpenAI /
+# OpenRouter / other OpenAI-compatible key when LLM_PROVIDER=openrouter and
+# LLM_BASE_URL points at that endpoint.
 LLM_API_KEY=replace-with-your-provider-key
 
 # --- Primary path (defaults shown) -------------------------------------------
+# "anthropic" (native Messages API) or "openrouter" (OpenAI-compatible Chat
+# Completions; "openai" is an alias). Set LLM_BASE_URL to match.
+#LLM_PROVIDER=anthropic
 #LLM_BASE_URL=https://api.anthropic.com/v1
 #LLM_MODEL=claude-sonnet-5
+# OpenAI instead, for example:
+#LLM_PROVIDER=openrouter
+#LLM_BASE_URL=https://api.openai.com/v1
+#LLM_MODEL=gpt-5.6-luna
 
 # Token-less enrollment and App Store routes remain disabled unless explicitly opted in.
 APP_STORE_ENABLED=false
