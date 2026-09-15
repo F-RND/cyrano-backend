@@ -28,6 +28,8 @@ FREE_COLD_ENROLLMENT_ENABLED=false
 TRANSCRIPT_CONTENT_LOGGING=false
 
 # --- Fallback leg (optional; inert unless FALLBACK_PROVIDER + key are set) ----
+# FALLBACK_BASE_URL defaults to the tag's own root: openrouter.ai for
+# "openrouter", api.openai.com for "openai". "anthropic" has no default.
 #FALLBACK_PROVIDER=openrouter
 #FALLBACK_MODEL=openai/gpt-oss-120b
 #FALLBACK_KEY_ENV=OPENROUTER_API_KEY
@@ -37,8 +39,13 @@ TRANSCRIPT_CONTENT_LOGGING=false
 #FALLBACK_RATE_USD_PER_M=0.5
 
 # --- Hosted paid tier (optional; only affects sessions with an owning user) ---
+# HOSTED_PAID_PROVIDER unset → the paid model runs on the primary leg above.
+# Set it ("anthropic" | "openrouter" | "openai") to pin the paid tier to a
+# wire and host of its own; HOSTED_PAID_BASE_URL defaults to that tag's root
+# ("openai" → api.openai.com, never OpenRouter's), and name HOSTED_PAID_KEY_ENV
+# whenever the paid host is not the primary's.
 #HOSTED_PAID_MODEL=claude-haiku-4-5-20251001
-#HOSTED_PAID_PROVIDER=openrouter
+#HOSTED_PAID_PROVIDER=openai
 #HOSTED_PAID_BASE_URL=https://api.openai.com/v1
 #HOSTED_PAID_KEY_ENV=OPENAI_API_KEY
 #OPENAI_API_KEY=replace-with-your-openai-key
