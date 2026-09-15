@@ -25,14 +25,76 @@ export interface LlmUsage {
 /** Which wire protocol serves a call. */
 export type LlmProvider = "anthropic" | "openrouter";
 
-/** OpenRouter's OpenAI-compatible root. Used only for BYOK when the client
- * selects the "openrouter" provider; the hosted path is always native Anthropic. */
+/** OpenRouter's OpenAI-compatible root. The default base URL for a BYOK
+ * "openrouter" selection and for the fallback leg; the primary path never
+ * defaults to it (LLM_BASE_URL is used verbatim — see env.ts LLM_PROVIDER). */
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+/** OpenAI's own root. The base URL for a BYOK "openai" selection: same wire
+ * as "openrouter", different company — which is exactly why the client has a
+ * separate value for it (an OpenAI key sent to openrouter.ai just 401s). */
+export const OPENAI_BASE_URL = "https://api.openai.com/v1";
+
+/** Anthropic's own root. Where an Anthropic client key goes when the
+ * operator's LLM_BASE_URL is no longer an Anthropic endpoint (LLM_PROVIDER
+ * on the OpenAI-compatible wire) — see hosted-config.ts anthropicBaseUrl(). */
+export const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
+
+/**
+ * What a CLIENT may put in `hello.llm_provider` / an `llm_provider` body
+ * field beside its own key. Unlike the operator tags (`LlmProvider`, parsed by
+ * asProvider), these name a destination, not just a wire: "openai" and
+ * "openrouter" both speak Chat Completions but at different hosts, and the
+ * server — not the client — owns the base URL for each. Resolved to a leg by
+ * llm/hosted-config.ts clientLeg(); anything unrecognised is treated as
+ * "anthropic", as it always was.
+ */
+export type ClientLlmProvider = "anthropic" | "openrouter" | "openai";
 
 /** True for providers that speak OpenAI-compatible Chat Completions rather than
  * the native Anthropic Messages API. */
 export function isOpenAiCompat(provider: LlmProvider | undefined): boolean {
   return provider === "openrouter";
+}
+
+/**
+ * Parse an OPERATOR-supplied provider tag (LLM_PROVIDER, FALLBACK_PROVIDER,
+ * HOSTED_PAID_PROVIDER, a price-test target) into the wire protocol it names.
+ * Unset, empty or unknown → undefined, so every caller falls back to its own
+ * safe default rather than guessing.
+ *
+ * "openai" is accepted as an alias for "openrouter": the tag has always named
+ * the OpenAI-compatible wire, not the OpenRouter company, and an operator
+ * pointing LLM_BASE_URL at api.openai.com should not have to write the other
+ * company's name to get there. Normalised on input only — the internal tag
+ * stays "openrouter" so isOpenAiCompat(), pricing and the existing tests do
+ * not move.
+ *
+ * Deliberately NOT used for the client-facing `hello.llm_provider` /
+ * `llm_provider` body field: there "openai" will mean a specific base URL
+ * (api.openai.com), not just a wire, and aliasing it here would send an
+ * OpenAI key to OpenRouter.
+ */
+export function asProvider(raw: unknown): LlmProvider | undefined {
+  if (raw === "anthropic" || raw === "openrouter") return raw;
+  if (raw === "openai") return "openrouter";
+  return undefined;
+}
+
+/**
+ * The public root an OPERATOR-supplied tag names when no base URL was given
+ * beside it. Keyed on the RAW tag, not the wire asProvider() folds it to:
+ * "openai" and "openrouter" share a wire but not a host, and a leg that
+ * defaulted the alias to openrouter.ai would send an OpenAI key to the wrong
+ * company. "anthropic" has no default here — callers that accept it decide
+ * between the operator's LLM_BASE_URL and {@link ANTHROPIC_BASE_URL}
+ * themselves (hosted-config.ts anthropicBaseUrl()), and the fallback leg
+ * deliberately refuses to default it at all (env.ts).
+ */
+export function defaultBaseUrlFor(raw: unknown): string | undefined {
+  if (raw === "openai") return OPENAI_BASE_URL;
+  if (raw === "openrouter") return OPENROUTER_BASE_URL;
+  return undefined;
 }
 
 /**

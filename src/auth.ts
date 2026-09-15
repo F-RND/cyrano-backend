@@ -85,6 +85,9 @@ export function identityFromUrl(url: URL): Identity {
 export function forwardWithIdentity(request: Request, identity: Identity): Request {
   const url = new URL(request.url);
   url.searchParams.set(IDENTITY_QUERY_PARAM, encodeIdentity(identity));
+  // A client credential is not an agent key: drop any `_agent` the caller
+  // put in its own URL so the DO can't be told a request came in on one.
+  url.searchParams.delete(AGENT_LABEL_QUERY_PARAM);
   return new Request(url, request);
 }
 
@@ -108,12 +111,26 @@ function bearerToken(request: Request): string | null {
 }
 
 /** True if `meta`'s owner (if any) doesn't conflict with `identity` — the
- * one rule every session-scoped request is gated by. A session with no
- * owner (self-host / operator-created) is open to anyone who already
- * cleared resolveIdentity, same as before this feature existed. */
-export function sessionAccessAllowed(identity: Identity, ownerUserId: string | undefined): boolean {
-  if (!ownerUserId) return true;
+ * one rule every session-scoped request is gated by.
+ *
+ * Three owner states:
+ *  - a tenant owner (`ownerUserId` set): that tenant or the operator;
+ *  - operator-owned (`operatorOwned`, stamped since 2026-09-14 on sessions
+ *    created under AUTH_TOKEN): the operator only. On a hosted deployment
+ *    the operator's own live sessions are exactly the ones a paying tenant
+ *    must never reach, and before this flag they were reachable by any
+ *    tenant who learned the session id;
+ *  - neither (a session stored before the flag existed): open to anyone who
+ *    already cleared resolveIdentity, exactly as before tenant users existed.
+ *    A self-host deployment has no tenants, so this is unchanged for it. */
+export function sessionAccessAllowed(
+  identity: Identity,
+  ownerUserId: string | undefined,
+  operatorOwned = false,
+): boolean {
   if (identity.kind === "operator") return true;
+  if (operatorOwned) return false;
+  if (!ownerUserId) return true;
   return identity.userId === ownerUserId;
 }
 

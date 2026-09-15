@@ -37,6 +37,42 @@ describe("ChatGPT MCP metadata", () => {
     expect(chatGPTMCPTesting.validAuthorizationQuery(excessScope, request)).toContain("scope");
   });
 
+  it("tells the user where their code will go and who says they are asking", async () => {
+    const { pairingRequester, pairingPage } = chatGPTMCPTesting;
+    // A client_id as RegistryDO mints it: base64url(JSON registration).signature.
+    const payload = btoa(JSON.stringify({
+      clientName: "Claude <script>",
+      redirectUris: ["https://claude.ai/api/mcp/auth_callback"],
+      issuedAt: 1,
+    })).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+    const params = new URLSearchParams({
+      client_id: `cyrano_chatgpt_${payload}.sig`,
+      redirect_uri: "https://claude.ai/api/mcp/auth_callback",
+    });
+    expect(pairingRequester(params)).toEqual({
+      clientName: "Claude <script>",
+      redirectHost: "claude.ai",
+    });
+    const html = await pairingPage(params).text();
+    // The host is the one thing an attacker's registration cannot dress up.
+    expect(html).toContain("Code will be sent to");
+    expect(html).toContain("claude.ai");
+    // The self-reported name is shown, escaped, and labelled as self-reported.
+    expect(html).toContain("Client calls itself");
+    expect(html).toContain("Claude &lt;script&gt;");
+    expect(html).not.toContain("<script>");
+
+    // An undecodable client_id still names the host; garbage yields nothing.
+    expect(pairingRequester(new URLSearchParams({
+      client_id: "whatever",
+      redirect_uri: "https://evil.test/cb",
+    }))).toEqual({ clientName: null, redirectHost: "evil.test" });
+    expect(pairingRequester(new URLSearchParams({ redirect_uri: "javascript:alert(1)" })))
+      .toEqual({ clientName: null, redirectHost: null });
+    const bare = await pairingPage(new URLSearchParams()).text();
+    expect(bare).not.toContain("Code will be sent to");
+  });
+
   it("lets the pairing form redirect back to the client that started the flow", () => {
     const { pairingCSP, cspOriginFor } = chatGPTMCPTesting;
 

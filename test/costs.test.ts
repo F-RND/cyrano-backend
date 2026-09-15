@@ -175,6 +175,17 @@ describe("purchaseLinkFor: the purchase record already on the user record", () =
     expect(link.stripe_customer_id).toBeNull();
   });
 
+  it("marks a sandbox subscription as such and still yields a pasteable Apple id", () => {
+    // TestFlight and App Review purchases are real usage with no money behind
+    // them. Reporting them as `apple` would put a tester's plan price into the
+    // revenue column; leaving the `sandbox:` segment on the id would send the
+    // operator to App Store Connect with a string that matches nothing.
+    const link = purchaseLinkFor(record({ stripeSubscriptionId: "apple:sandbox:2000000912345678" }));
+    expect(link.source).toBe("apple-sandbox");
+    expect(link.apple_original_transaction_id).toBe("2000000912345678");
+    expect(link.stripe_subscription_id).toBeNull();
+  });
+
   it("reports a Stripe subscriber under the Stripe ids and no Apple id", () => {
     const link = purchaseLinkFor(record({ stripeCustomerId: "cus_9", stripeSubscriptionId: "sub_9" }));
     expect(link).toMatchObject({
@@ -310,6 +321,25 @@ describe("revenue and net: a number nobody chose is null, never zero", () => {
   it("reports a comped key as earning a REAL zero — the row an operator most wants", () => {
     const row = costRowFor(
       record({ plan: "monthly", promoExpiresAt: NOW + DAY, usage: usage({ spendMicros: 250_000 }) }),
+      { now: NOW },
+    );
+    expect(row.revenue_basis).toBe("comped");
+    expect(row.revenue_micros).toBe(0);
+    expect(row.net_micros).toBe(-250_000);
+  });
+
+  it("prices a sandbox subscriber at a real zero, not at the plan's list price", () => {
+    // The whole reason sandbox tenants get their own namespace: an active
+    // `monthly` plan on a TestFlight or App Review purchase would otherwise
+    // book $4.99/month of revenue Apple never collected.
+    const row = costRowFor(
+      record({
+        plan: "monthly",
+        subStatus: "active",
+        subExpiresAt: NOW + DAY,
+        stripeSubscriptionId: "apple:sandbox:2000000912345678",
+        usage: usage({ spendMicros: 250_000 }),
+      }),
       { now: NOW },
     );
     expect(row.revenue_basis).toBe("comped");

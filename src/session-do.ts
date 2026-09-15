@@ -3,6 +3,7 @@
 
 import type { Env } from "./env.js";
 import { fallbackLegFor, transcriptContentLoggingEnabled } from "./env.js";
+import { ClientLlmSelectionError, clientSelection, hostedPaidLeg } from "./llm/hosted-config.js";
 import { agentLabelFromUrl, identityFromUrl, sessionAccessAllowed, type Identity } from "./auth.js";
 import {
   isRetentionTier,
@@ -13,12 +14,11 @@ import {
 import {
   costWeightedUnits,
   isRetryableStatus,
-  OPENROUTER_BASE_URL,
   type LlmConfig,
   type LlmProvider,
   type ServedLeg,
+  type ClientLlmProvider,
 } from "./llm/client.js";
-import { namedEnvKey } from "./llm/hosted-config.js";
 import {
   createSpendLedger,
   isEmptyDelta,
@@ -175,6 +175,12 @@ interface SessionMeta {
    * those stay open to anyone who already cleared the router's identity
    * check, exactly as before tenant users existed. See auth.ts. */
   owner_user_id?: string;
+  /** Created under the operator's own AUTH_TOKEN (stamped since 2026-09-14).
+   * Closes the session to every tenant identity — without it an operator's
+   * live session on a hosted deployment was open to any tenant who learned
+   * its id. Absent on sessions stored before the flag existed, which keep
+   * the old open-to-any-authenticated-caller behaviour. See auth.ts. */
+  operator_owned?: true;
   /** This session runs on a RELAY identity of Cyrano's own deployment, so the
    * post-end retention ceiling applies (PLAN-REMOTE.md option C). Persisted in
    * meta — not only socket runtime — because the end path that most needs it
@@ -200,7 +206,7 @@ interface SessionSocketAttachment {
   runtime?: {
     version: 1;
     clientLlmApiKey: string | null;
-    clientLlmProvider: LlmProvider | null;
+    clientLlmProvider: ClientLlmProvider | null;
     clientLlmModel: string | null;
     sessionOwnerUserId: string | null;
     userEntitled: boolean;
@@ -330,7 +336,7 @@ function deriveAnalysisStatus(combined?: PassFailure, custom?: PassFailure): Ana
     return {
       state: "auth_error",
       detail:
-        "The LLM provider rejected the API key (401/403) — check the Anthropic key in Settings, or LLM_API_KEY on the backend.",
+        "The LLM provider rejected the API key (401/403) — check the API key in Settings, or LLM_API_KEY on the backend.",
     };
   }
   if (combined) {
@@ -366,7 +372,7 @@ export function sessionLlmConfig(
   // Nullable, not just optional: the DO stores these as `string | null` after a
   // hibernation wake, and `?? ` must treat "restored as null" exactly like
   // "never set" or a woken BYOK session would silently become a hosted one.
-  client: { apiKey?: string | null; provider?: LlmProvider | null; model?: string | null },
+  client: { apiKey?: string | null; provider?: ClientLlmProvider | null; model?: string | null },
   hosted: { provider: LlmProvider; baseUrl: string; apiKey: string; model: string },
   meters: {
     addUnits: (units: number) => void;
@@ -377,12 +383,9 @@ export function sessionLlmConfig(
   },
 ): LlmConfig {
   if (client.apiKey) {
-    const provider: LlmProvider = client.provider ?? "anthropic";
     return {
-      baseUrl: provider === "openrouter" ? OPENROUTER_BASE_URL : env.LLM_BASE_URL,
+      ...clientSelection(env, client.provider, client.model, hosted.model),
       apiKey: client.apiKey,
-      provider,
-      model: client.model ?? hosted.model,
       logContent: transcriptContentLoggingEnabled(env),
       // Asked explicitly, and always undefined: a BYOK call must never be
       // failed over onto our key at a provider the user did not choose
@@ -446,7 +449,7 @@ export class SessionDO implements DurableObject {
     // operator-created) stays open to anyone who already cleared the
     // router's resolveIdentity, exactly as before tenant users existed.
     const meta = await this.getMeta();
-    if (meta && !sessionAccessAllowed(identity, meta.owner_user_id)) {
+    if (meta && !sessionAccessAllowed(identity, meta.owner_user_id, meta.operator_owned === true)) {
       return new Response("forbidden", { status: 403 });
     }
 
@@ -711,6 +714,7 @@ export class SessionDO implements DurableObject {
         custom_categories: sanitizeDefinitions(message.custom_categories),
         detect_categories: message.detect_categories === true,
         ...(identity?.kind === "user" ? { owner_user_id: identity.userId } : {}),
+        ...(identity?.kind === "operator" ? { operator_owned: true as const } : {}),
       };
       await this.ctx.storage.put("meta", meta);
       await this.ctx.storage.put("alarm:purpose", "max_duration");
@@ -932,6 +936,14 @@ export class SessionDO implements DurableObject {
       this.broadcastStatusOnlyResult(meta.session_id, this.noLlmKeyStatus(), newCursor);
       return;
     }
+    // Same terminal shape for a client key the server cannot honour (an
+    // OpenAI-compatible key with no model): it needs a new hello, not a retry.
+    const selectionError = this.clientSelectionError();
+    if (selectionError) {
+      await consumeWindow();
+      this.broadcastStatusOnlyResult(meta.session_id, selectionError, newCursor);
+      return;
+    }
 
     // Entitlement gate (paid hosted tier): a lapsed subscription stops hosted
     // analysis and tells the client to renew or bring their own key. On-device
@@ -1018,11 +1030,16 @@ export class SessionDO implements DurableObject {
 
     await consumeWindow();
     const status = deriveAnalysisStatus(combined.failure, customFailure);
-    // TEMP DEBUG (2026-07-16, Luna trial): is a tick producing commitments live,
-    // or do they only appear in the session-end flush (force)?
+    // Tick diagnostics (originally a 2026-07-16 trial debug line): is a tick
+    // producing commitments live, or only in the session-end flush (force)?
+    // Counts only by default — commitment owners are speaker names, which is
+    // transcript-derived content and so rides behind TRANSCRIPT_CONTENT_LOGGING
+    // like every other content log.
     console.log(
       `ANALYSIS_TICK force=${force} commitments=${combined.result.commitments.length} ` +
-        `owners=[${combined.result.commitments.map((c) => c.owner).join(",")}] ` +
+        (transcriptContentLoggingEnabled(this.env)
+          ? `owners=[${combined.result.commitments.map((c) => c.owner).join(",")}] `
+          : "") +
         `asks=${combined.result.asks.length} failed=${combined.failure !== undefined}`,
     );
     await this.applyAnalysisResult(meta, combined.result, newCursor, custom, status, window);
@@ -2250,8 +2267,9 @@ export class SessionDO implements DurableObject {
 
   /** BYOK provider + model for the client key (from hello.llm_provider /
    * llm_model). Only meaningful when clientLlmApiKey is set; the hosted path
-   * is always native Anthropic on env.LLM_MODEL. In-memory, re-sent each hello. */
-  private clientLlmProvider: LlmProvider | null = null;
+   * runs whatever hostedLeg() resolves (LLM_PROVIDER, or the paid tier's
+   * provider). In-memory, re-sent each hello. */
+  private clientLlmProvider: ClientLlmProvider | null = null;
   private clientLlmModel: string | null = null;
 
   /** Cached `owner_user_id` of this session, set at hello. Present ⇒ this is a
@@ -2321,39 +2339,33 @@ export class SessionDO implements DurableObject {
   }
 
   /** Provider/endpoint/key for the HOSTED path (our key, no BYOK). Owned paid
-   * sessions may run on a non-Anthropic provider — e.g. GPT-5.6 Luna via the
-   * OpenAI-compatible endpoint — when HOSTED_PAID_PROVIDER is set; everyone
-   * else stays native Anthropic on env.LLM_BASE_URL/LLM_API_KEY. Model comes
-   * from hostedModel(), so metering and the actual call agree. */
+   * sessions may run on the paid tier — e.g. GPT-5.6 Luna via the
+   * OpenAI-compatible endpoint — when HOSTED_PAID_* says so; everyone else
+   * runs the primary leg (LLM_PROVIDER at LLM_BASE_URL/LLM_API_KEY). Both
+   * resolved by llm/hosted-config.ts hostedPaidLeg so the HTTP routes agree.
+   * Model comes from hostedModel(), so metering and the actual call agree. */
   private hostedLeg(): { provider: LlmProvider; baseUrl: string; apiKey: string; model: string } {
-    const owned = Boolean(this.sessionOwnerUserId && this.env.HOSTED_PAID_MODEL);
-    if (owned && this.env.HOSTED_PAID_PROVIDER === "openrouter") {
-      const keyEnv = this.env.HOSTED_PAID_KEY_ENV ?? "LLM_API_KEY";
-      // `namedEnvKey` and not a bare index: HOSTED_PAID_KEY_ENV is
-      // operator-supplied, and an Object.prototype name resolves to an
-      // inherited function, which is non-nullish — so `??` would not fall
-      // through and a function would go out as the bearer token. Same guard,
-      // same reason, as llm/hosted-config.ts's copy of this branch.
-      const apiKey = namedEnvKey(this.env, keyEnv) ?? this.env.LLM_API_KEY;
-      return {
-        provider: "openrouter",
-        baseUrl: this.env.HOSTED_PAID_BASE_URL ?? OPENROUTER_BASE_URL,
-        apiKey,
-        model: this.hostedModel(),
-      };
+    return { ...hostedPaidLeg(this.env, Boolean(this.sessionOwnerUserId)), model: this.hostedModel() };
+  }
+
+  /** The status for a BYOK selection `sessionLlmConfig` would refuse, or null
+   * when the selection is usable. Checked before analysis so the refusal is a
+   * status on the wire rather than an exception inside the analysis tick. */
+  private clientSelectionError(): AnalysisStatusInfo | null {
+    if (!this.clientLlmApiKey) return null;
+    try {
+      clientSelection(this.env, this.clientLlmProvider, this.clientLlmModel, this.hostedModel());
+      return null;
+    } catch (e) {
+      if (e instanceof ClientLlmSelectionError) return { state: "llm_error", detail: e.message };
+      throw e;
     }
-    return {
-      provider: "anthropic",
-      baseUrl: this.env.LLM_BASE_URL,
-      apiKey: this.env.LLM_API_KEY,
-      model: this.hostedModel(),
-    };
   }
 
   private noLlmKeyStatus(): AnalysisStatusInfo {
     return {
       state: "no_llm_key",
-      detail: "No Anthropic API key is configured for this session — enter one in Settings, or set LLM_API_KEY on the backend.",
+      detail: "No LLM API key is configured for this session — enter one in Settings, or set LLM_API_KEY on the backend.",
     };
   }
 

@@ -3,7 +3,8 @@
 
 import {
   FALLBACK_TIMEOUT_MS,
-  OPENROUTER_BASE_URL,
+  asProvider,
+  defaultBaseUrlFor,
   type FallbackLeg,
   type LlmProvider,
 } from "./llm/client.js";
@@ -19,10 +20,20 @@ export interface Env {
   // Secrets — set with `wrangler secret put`, never committed.
   AUTH_TOKEN: string;
   LLM_API_KEY: string;
-  // Vars — see wrangler.jsonc. LLM_BASE_URL is an Anthropic-compatible /v1
-  // root (the client speaks the native Messages API as of 2026-07-11).
+  // Vars — see wrangler.jsonc. LLM_BASE_URL is the /v1 root of whichever
+  // provider LLM_PROVIDER names.
   LLM_BASE_URL: string;
   LLM_MODEL: string;
+  // Which wire protocol the primary path speaks to LLM_BASE_URL with LLM_API_KEY.
+  // "anthropic" (default; native Messages API) or "openrouter" (OpenAI-
+  // compatible Chat Completions — OpenAI itself, OpenRouter, or any compatible
+  // server; "openai" is accepted as an alias). The tag names the wire, not a
+  // company: an operator choosing "openrouter" sets LLM_BASE_URL to the
+  // endpoint they mean (https://api.openai.com/v1, https://openrouter.ai/api/v1,
+  // …) themselves. There is deliberately no per-provider base-URL default on
+  // the primary path — the operator set the URL once, on purpose, and a tag
+  // must never silently redirect it. Unset/unknown → "anthropic".
+  LLM_PROVIDER?: string;
 
   // --- Free 3-day Pro trial (src/trial.ts) ---
   // Base64 (PKCS8 DER) of the Ed25519 private key the Worker signs trial tokens
@@ -62,11 +73,18 @@ export interface Env {
   // Sonnet, which is what makes the subscription price viable. Operator /
   // self-host sessions (no owner) keep using LLM_MODEL.
   HOSTED_PAID_MODEL?: string;
-  // Optional: run the paid hosted model on a non-Anthropic provider. When
-  // HOSTED_PAID_PROVIDER === "openrouter", owned sessions speak the
-  // OpenAI-compatible Chat Completions API at HOSTED_PAID_BASE_URL using the
-  // key named by HOSTED_PAID_KEY_ENV (a secret) — e.g. GPT-5.6 Luna via OpenAI.
-  // Unset → the hosted path stays native Anthropic on LLM_BASE_URL/LLM_API_KEY.
+  // Optional: run the paid hosted model somewhere other than the primary
+  // endpoint. Unset → owned sessions run HOSTED_PAID_MODEL on the PRIMARY leg
+  // (LLM_PROVIDER's wire at LLM_BASE_URL with LLM_API_KEY) — the only thing
+  // that can work at that URL, whatever wire it speaks. Set ("anthropic",
+  // "openrouter", or "openai") → owned sessions speak that wire at
+  // HOSTED_PAID_BASE_URL (default: the tag's public root — api.openai.com for
+  // "openai", openrouter.ai for "openrouter"; "anthropic" follows
+  // LLM_BASE_URL while the primary is Anthropic, else api.anthropic.com) with
+  // the key named by HOSTED_PAID_KEY_ENV (a secret; default LLM_API_KEY, so
+  // name one whenever the paid host is not the primary's). Resolved in ONE
+  // place, llm/hosted-config.ts hostedPaidLeg(), for the WebSocket and HTTP
+  // paths alike.
   HOSTED_PAID_PROVIDER?: string;
   HOSTED_PAID_BASE_URL?: string;
   HOSTED_PAID_KEY_ENV?: string;
@@ -90,8 +108,9 @@ export interface Env {
   //
   // "anthropic" | "openrouter". Unset/empty/unknown → no fallback.
   FALLBACK_PROVIDER?: string;
-  // /v1 root. Unset → OpenRouter's public API root. Required for "anthropic", which has no
-  // safe default here (LLM_BASE_URL is the primary and would fail over to itself).
+  // /v1 root. Unset → the tag's public root ("openrouter" → openrouter.ai,
+  // "openai" → api.openai.com). Required for "anthropic", which has no safe
+  // default here (LLM_BASE_URL is the primary and would fail over to itself).
   FALLBACK_BASE_URL?: string;
   // Model on the fallback provider. Required for every provider.
   FALLBACK_MODEL?: string;
@@ -167,18 +186,6 @@ export function transcriptContentLoggingEnabled(env: Pick<Env, "TRANSCRIPT_CONTE
   return env.TRANSCRIPT_CONTENT_LOGGING === "true";
 }
 
-/** Provider defaults for the fallback leg. "anthropic" has no
- * default base URL on purpose: the only sensible value would be LLM_BASE_URL,
- * i.e. failing over to the provider that just failed. */
-const FALLBACK_DEFAULTS: Partial<Record<LlmProvider, { baseUrl?: string; model?: string }>> = {
-
-  openrouter: { baseUrl: OPENROUTER_BASE_URL },
-  anthropic: {},
-};
-
-function asProvider(raw: string | undefined): LlmProvider | undefined {
-  return raw === "anthropic" || raw === "openrouter" ? raw : undefined;
-}
 
 /**
  * THE ONLY PLACE AN `LlmConfig.fallback` MAY BE BUILT.
@@ -212,9 +219,13 @@ export function fallbackLegFor(
   const apiKey = (env as unknown as Record<string, unknown>)[keyEnv];
   if (typeof apiKey !== "string" || apiKey.length === 0) return undefined;
 
-  const defaults = FALLBACK_DEFAULTS[provider] ?? {};
-  const baseUrl = env.FALLBACK_BASE_URL || defaults.baseUrl;
-  const model = env.FALLBACK_MODEL || defaults.model;
+  // The default host follows the RAW tag ("openai" → api.openai.com,
+  // "openrouter" → openrouter.ai), never the folded wire: FALLBACK_PROVIDER=openai
+  // with no FALLBACK_BASE_URL must not send an OpenAI key to OpenRouter.
+  // "anthropic" has no default on purpose — the only candidate would be
+  // LLM_BASE_URL, i.e. failing over to the provider that just failed.
+  const baseUrl = env.FALLBACK_BASE_URL || defaultBaseUrlFor(env.FALLBACK_PROVIDER);
+  const model = env.FALLBACK_MODEL;
   if (!baseUrl || !model) return undefined;
 
   const parsedTimeout = Number(env.FALLBACK_TIMEOUT_MS);

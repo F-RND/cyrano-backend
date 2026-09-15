@@ -512,7 +512,7 @@ describe("I3 at the real call sites (/analyze, /ask, /dictation/polish, /context
     const ledger = createSpendLedger();
     const config = resolveAnalysisLlmConfig(
       env,
-      { llm_api_key: CLIENT_KEY, llm_provider: "openrouter" },
+      { llm_api_key: CLIENT_KEY, llm_provider: "openrouter", llm_model: "meta-llama/llama-3.3-70b-instruct" },
       user,
       ledger,
     );
