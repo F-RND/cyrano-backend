@@ -112,7 +112,7 @@ The tag never changes the URL: an operator choosing `openrouter` sets `LLM_BASE_
 npx wrangler secret put LLM_API_KEY      # the OpenAI key
 ```
 
-Cost reporting resolves the billing account from the base URL's host, so an `openrouter`-wire primary pointed at `api.openai.com` prices on the OpenAI rate card without further configuration. The same tag vocabulary applies to the optional groups below (`FALLBACK_PROVIDER`, `HOSTED_PAID_PROVIDER`, price-test targets). Cyrano clients may also bring their own key per session (`hello.llm_api_key` with `llm_provider` `"anthropic"`, `"openrouter"` or `"openai"` — the client names a destination, and the server owns the base URL for each); a client key is never failed over onto the operator's key.
+Cost reporting resolves the billing account from the base URL's host, so an `openrouter`-wire primary pointed at `api.openai.com` prices on the OpenAI rate card without further configuration. The same tag vocabulary applies to the optional groups below (`FALLBACK_PROVIDER`, `HOSTED_PAID_PROVIDER`, price-test targets). Cyrano clients may also bring their own key per session (`hello.llm_api_key` with `llm_provider` `"anthropic"`, `"openrouter"` or `"openai"` — the client names a destination, and the server owns the base URL for each: `openrouter.ai`, `api.openai.com`, and for an Anthropic key `LLM_BASE_URL` while the primary speaks Anthropic — so a gateway deployment routes client keys through the gateway too — or `api.anthropic.com` once the primary is on the other wire); a client key is never failed over onto the operator's key.
 
 ### Primary path
 
@@ -131,10 +131,10 @@ A second provider tried exactly once after the primary fails in a retryable way.
 
 | Name | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| `FALLBACK_PROVIDER` | var | `""` | `anthropic` or `openrouter`. Anything else disables the feature. |
+| `FALLBACK_PROVIDER` | var | `""` | `anthropic`, `openrouter` or `openai`. Anything else disables the feature. |
 | `FALLBACK_KEY_ENV` | var | — | Required. The *name* of the secret holding the fallback key (for example `OPENROUTER_API_KEY`), never the key itself. |
 | `FALLBACK_MODEL` | var | — | Required. Model on the fallback provider. |
-| `FALLBACK_BASE_URL` | var | OpenRouter's public root for `openrouter`; none for `anthropic` | `/v1` root. Required for `anthropic`. |
+| `FALLBACK_BASE_URL` | var | the tag's public root — `openrouter.ai` for `openrouter`, `api.openai.com` for `openai`; none for `anthropic` | `/v1` root. Required for `anthropic`. |
 | `FALLBACK_TIMEOUT_MS` | var | `15000` | Budget for the fallback attempt alone. |
 | `FALLBACK_RATE_USD_PER_M` | var | — | Flat USD per 1M tokens for cost reporting when the provider has no published per-model price. |
 
@@ -145,9 +145,9 @@ Only meaningful when sessions have an owning user (Stripe or App Store entitleme
 | Name | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | `HOSTED_PAID_MODEL` | var | — | Model for owned (paid) sessions; unset falls back to `LLM_MODEL`. |
-| `HOSTED_PAID_PROVIDER` | var | — | `openrouter` runs owned sessions over OpenAI-compatible Chat Completions; unset keeps native Anthropic. |
-| `HOSTED_PAID_BASE_URL` | var | OpenRouter's public root | `/v1` root for the paid provider (for example `https://api.openai.com/v1`). |
-| `HOSTED_PAID_KEY_ENV` | var | `LLM_API_KEY` | Name of the secret holding the paid-provider key. |
+| `HOSTED_PAID_PROVIDER` | var | — | Unset: owned sessions run the paid model on the **primary** leg (`LLM_PROVIDER`'s wire at `LLM_BASE_URL`). `anthropic`, `openrouter` or `openai`: owned sessions speak that wire at `HOSTED_PAID_BASE_URL`, even after the primary moves elsewhere. |
+| `HOSTED_PAID_BASE_URL` | var | the tag's public root — `api.openai.com` for `openai`, `openrouter.ai` for `openrouter`; for `anthropic`, `LLM_BASE_URL` while the primary is Anthropic, else `api.anthropic.com` | `/v1` root for the paid provider. |
+| `HOSTED_PAID_KEY_ENV` | var | `LLM_API_KEY` | Name of the secret holding the paid-provider key. Name one whenever the paid host is not the primary's. |
 | `STRIPE_SECRET_KEY` | secret | — | Stripe routes return 503 without it. |
 | `STRIPE_WEBHOOK_SECRET` | secret | — | Webhook signature verification. |
 | `STRIPE_PRICE_ANNUAL`, `STRIPE_PRICE_MONTHLY` | var | — | Recurring Price ids. |
