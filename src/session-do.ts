@@ -3,7 +3,7 @@
 
 import type { Env } from "./env.js";
 import { fallbackLegFor, transcriptContentLoggingEnabled } from "./env.js";
-import { ClientLlmSelectionError, clientSelection, primaryLeg } from "./llm/hosted-config.js";
+import { ClientLlmSelectionError, clientSelection, hostedPaidLeg } from "./llm/hosted-config.js";
 import { agentLabelFromUrl, identityFromUrl, sessionAccessAllowed, type Identity } from "./auth.js";
 import {
   isRetentionTier,
@@ -14,14 +14,11 @@ import {
 import {
   costWeightedUnits,
   isRetryableStatus,
-  OPENROUTER_BASE_URL,
   type LlmConfig,
   type LlmProvider,
   type ServedLeg,
-  asProvider,
   type ClientLlmProvider,
 } from "./llm/client.js";
-import { namedEnvKey } from "./llm/hosted-config.js";
 import {
   createSpendLedger,
   isEmptyDelta,
@@ -2330,29 +2327,13 @@ export class SessionDO implements DurableObject {
   }
 
   /** Provider/endpoint/key for the HOSTED path (our key, no BYOK). Owned paid
-   * sessions may run on a non-Anthropic provider — e.g. GPT-5.6 Luna via the
-   * OpenAI-compatible endpoint — when HOSTED_PAID_PROVIDER is set; everyone
-   * else runs the primary leg (LLM_PROVIDER at LLM_BASE_URL/LLM_API_KEY,
-   * resolved by llm/hosted-config.ts primaryLeg so the HTTP routes agree).
+   * sessions may run on the paid tier — e.g. GPT-5.6 Luna via the
+   * OpenAI-compatible endpoint — when HOSTED_PAID_* says so; everyone else
+   * runs the primary leg (LLM_PROVIDER at LLM_BASE_URL/LLM_API_KEY). Both
+   * resolved by llm/hosted-config.ts hostedPaidLeg so the HTTP routes agree.
    * Model comes from hostedModel(), so metering and the actual call agree. */
   private hostedLeg(): { provider: LlmProvider; baseUrl: string; apiKey: string; model: string } {
-    const owned = Boolean(this.sessionOwnerUserId && this.env.HOSTED_PAID_MODEL);
-    if (owned && asProvider(this.env.HOSTED_PAID_PROVIDER) === "openrouter") {
-      const keyEnv = this.env.HOSTED_PAID_KEY_ENV ?? "LLM_API_KEY";
-      // `namedEnvKey` and not a bare index: HOSTED_PAID_KEY_ENV is
-      // operator-supplied, and an Object.prototype name resolves to an
-      // inherited function, which is non-nullish — so `??` would not fall
-      // through and a function would go out as the bearer token. Same guard,
-      // same reason, as llm/hosted-config.ts's copy of this branch.
-      const apiKey = namedEnvKey(this.env, keyEnv) ?? this.env.LLM_API_KEY;
-      return {
-        provider: "openrouter",
-        baseUrl: this.env.HOSTED_PAID_BASE_URL ?? OPENROUTER_BASE_URL,
-        apiKey,
-        model: this.hostedModel(),
-      };
-    }
-    return { ...primaryLeg(this.env), model: this.hostedModel() };
+    return { ...hostedPaidLeg(this.env, Boolean(this.sessionOwnerUserId)), model: this.hostedModel() };
   }
 
   /** The status for a BYOK selection `sessionLlmConfig` would refuse, or null

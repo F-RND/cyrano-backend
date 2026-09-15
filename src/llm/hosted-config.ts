@@ -34,9 +34,11 @@ import type { Env } from "../env.js";
 import { fallbackLegFor, transcriptContentLoggingEnabled } from "../env.js";
 import type { Identity } from "../auth.js";
 import {
+  ANTHROPIC_BASE_URL,
   OPENAI_BASE_URL,
   OPENROUTER_BASE_URL,
   asProvider,
+  defaultBaseUrlFor,
   type LlmConfig,
   type LlmProvider,
 } from "./client.js";
@@ -80,15 +82,31 @@ export function primaryLeg(env: Env): { provider: LlmProvider; baseUrl: string; 
 }
 
 /**
+ * Where a call on the native Anthropic wire goes when it is NOT the primary
+ * leg: an Anthropic client key, or a paid tier pinned to "anthropic".
+ *
+ * LLM_BASE_URL used to be an Anthropic root by definition, so Anthropic BYOK
+ * simply followed it — which is what lets a deployment on an AI Gateway route
+ * client keys through the gateway too. With LLM_PROVIDER that URL can be an
+ * OpenAI-compatible endpoint, and an Anthropic key POSTed to
+ * api.openai.com/v1/messages is a user secret handed to the wrong company (and
+ * a failed call). So: follow LLM_BASE_URL only while the primary actually
+ * speaks Anthropic; otherwise go to Anthropic's own root.
+ */
+export function anthropicBaseUrl(env: Env): string {
+  return primaryLeg(env).provider === "anthropic" ? env.LLM_BASE_URL : ANTHROPIC_BASE_URL;
+}
+
+/**
  * The wire and host a CLIENT-supplied key is sent to, from the client's
  * `llm_provider` value. The counterpart of primaryLeg() for the BYOK branch,
  * and the ONLY place a client tag becomes a base URL, so the WebSocket path
  * (sessionLlmConfig) and the HTTP routes (below) cannot disagree.
  *
- *   "anthropic"  → native Messages API at the operator's LLM_BASE_URL (which
- *                  is Anthropic's root unless the operator moved it — a BYOK
- *                  Anthropic key follows the operator's gateway, as it always
- *                  has, so a deployment on an AI Gateway keeps working);
+ *   "anthropic"  → native Messages API at anthropicBaseUrl(): the operator's
+ *                  LLM_BASE_URL while the primary is Anthropic (a BYOK key
+ *                  follows the operator's gateway, as it always has), and
+ *                  Anthropic's own root once the primary is on the other wire;
  *   "openrouter" → Chat Completions at openrouter.ai;
  *   "openai"     → Chat Completions at api.openai.com.
  *
@@ -99,7 +117,55 @@ export function primaryLeg(env: Env): { provider: LlmProvider; baseUrl: string; 
 export function clientLeg(env: Env, raw: unknown): { provider: LlmProvider; baseUrl: string } {
   if (raw === "openrouter") return { provider: "openrouter", baseUrl: OPENROUTER_BASE_URL };
   if (raw === "openai") return { provider: "openrouter", baseUrl: OPENAI_BASE_URL };
-  return { provider: "anthropic", baseUrl: env.LLM_BASE_URL };
+  return { provider: "anthropic", baseUrl: anthropicBaseUrl(env) };
+}
+
+/**
+ * The HOSTED leg for a session that has an owning (paid) user, and the ONLY
+ * place HOSTED_PAID_* is turned into one — SessionDO.hostedLeg and
+ * resolveAnalysisLlmConfig both call this, so the WebSocket and HTTP paths
+ * cannot disagree about where paid traffic goes.
+ *
+ * Not owned, or no HOSTED_PAID_MODEL → the primary leg, unchanged.
+ *
+ * HOSTED_PAID_PROVIDER unset (or unknown) → the primary leg with the paid
+ * model: LLM_PROVIDER's wire at LLM_BASE_URL with LLM_API_KEY. That is the
+ * only thing that can work at that URL, so it follows the primary's wire
+ * rather than pinning "anthropic" — an Anthropic request to an OpenAI
+ * endpoint is not a safer default, just a broken one.
+ *
+ * HOSTED_PAID_PROVIDER set → that wire, at HOSTED_PAID_BASE_URL or the RAW
+ * tag's own root ("openai" → api.openai.com, "openrouter" → openrouter.ai —
+ * never the alias folded onto the other company's host; "anthropic" →
+ * anthropicBaseUrl()), with the key HOSTED_PAID_KEY_ENV names (default
+ * LLM_API_KEY). An explicit tag is honoured even when it names the primary's
+ * wire, so HOSTED_PAID_PROVIDER=anthropic keeps paid traffic on Anthropic
+ * after the primary moves.
+ */
+export function hostedPaidLeg(
+  env: Env,
+  owned: boolean,
+): { provider: LlmProvider; baseUrl: string; apiKey: string; model: string } {
+  const primary = primaryLeg(env);
+  if (!owned || !env.HOSTED_PAID_MODEL) return primary;
+  const model = env.HOSTED_PAID_MODEL;
+  const raw = env.HOSTED_PAID_PROVIDER;
+  const provider = asProvider(raw);
+  if (!provider) return { ...primary, model };
+  // `namedEnvKey` and not a bare index: HOSTED_PAID_KEY_ENV is operator-
+  // supplied, and an Object.prototype name ("constructor") resolves to an
+  // inherited FUNCTION, which is non-nullish — `??` would not fall through and
+  // a function would go out as the bearer token. Same guard as env.ts's
+  // FALLBACK_KEY_ENV lookup.
+  const keyEnv = env.HOSTED_PAID_KEY_ENV ?? "LLM_API_KEY";
+  return {
+    provider,
+    baseUrl:
+      env.HOSTED_PAID_BASE_URL ??
+      (provider === "anthropic" ? anthropicBaseUrl(env) : defaultBaseUrlFor(raw)!),
+    apiKey: namedEnvKey(env, keyEnv) ?? primary.apiKey,
+    model,
+  };
 }
 
 /** A client-supplied selection the server cannot honour. `code` is the wire
@@ -167,21 +233,10 @@ export function resolveAnalysisLlmConfig(
 ): LlmConfig {
   const clientKey = body?.llm_api_key;
   if (!clientKey) {
-    const owned = identity.kind === "user" && Boolean(env.HOSTED_PAID_MODEL);
-    const primary = primaryLeg(env);
-    const model = owned ? env.HOSTED_PAID_MODEL! : primary.model;
-    const openrouter = owned && asProvider(env.HOSTED_PAID_PROVIDER) === "openrouter";
-    const keyEnv = env.HOSTED_PAID_KEY_ENV ?? "LLM_API_KEY";
     return {
-      provider: openrouter ? "openrouter" : primary.provider,
-      baseUrl: openrouter ? (env.HOSTED_PAID_BASE_URL ?? OPENROUTER_BASE_URL) : primary.baseUrl,
-      // `typeof … === "string"` and not `??`: `keyEnv` is operator-supplied, so
-      // HOSTED_PAID_KEY_ENV="constructor" (or any Object.prototype name)
-      // resolves to an inherited FUNCTION, which is non-nullish — `??` would
-      // never fall through and a function would be sent as the API key. env.ts
-      // guards its own key lookup exactly this way; this one did not.
-      apiKey: openrouter ? namedEnvKey(env, keyEnv) ?? primary.apiKey : primary.apiKey,
-      model,
+      // Paid tier for an owned identity, else the primary — one resolver,
+      // shared with SessionDO.hostedLeg (see hostedPaidLeg).
+      ...hostedPaidLeg(env, identity.kind === "user"),
       logContent: transcriptContentLoggingEnabled(env),
       fallback: fallbackLegFor(env, { usingClientKey: false }),
       // Priced at the provider AND model that served the block, so a
@@ -220,9 +275,19 @@ export function resolveStatelessLlmConfig(
   ledger: SpendLedger,
 ): LlmConfig {
   const usingClientKey = Boolean(clientKey);
+  // Hosted: the primary leg — its wire too, not just its URL, or an
+  // OpenAI-wire primary would be spoken to in Anthropic here. BYOK: these
+  // routes carry no `llm_provider`, and the client contract sends only an
+  // Anthropic key on them, so the key goes where an Anthropic client key goes
+  // (clientLeg "anthropic": LLM_BASE_URL while the primary is Anthropic, else
+  // Anthropic's own root — never an OpenAI-compatible LLM_BASE_URL).
+  const leg = clientKey
+    ? { ...clientLeg(env, "anthropic"), apiKey: clientKey }
+    : primaryLeg(env);
   return {
-    baseUrl: env.LLM_BASE_URL,
-    apiKey: clientKey || env.LLM_API_KEY,
+    provider: leg.provider,
+    baseUrl: leg.baseUrl,
+    apiKey: leg.apiKey,
     model: env.LLM_MODEL,
     fallback: fallbackLegFor(env, { usingClientKey }),
     // Priced at the provider+model that ACTUALLY served the block, not at
