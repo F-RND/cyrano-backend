@@ -178,6 +178,12 @@ interface SessionMeta {
    * those stay open to anyone who already cleared the router's identity
    * check, exactly as before tenant users existed. See auth.ts. */
   owner_user_id?: string;
+  /** Created under the operator's own AUTH_TOKEN (stamped since 2026-09-14).
+   * Closes the session to every tenant identity — without it an operator's
+   * live session on a hosted deployment was open to any tenant who learned
+   * its id. Absent on sessions stored before the flag existed, which keep
+   * the old open-to-any-authenticated-caller behaviour. See auth.ts. */
+  operator_owned?: true;
   /** This session runs on a RELAY identity of Cyrano's own deployment, so the
    * post-end retention ceiling applies (PLAN-REMOTE.md option C). Persisted in
    * meta — not only socket runtime — because the end path that most needs it
@@ -446,7 +452,7 @@ export class SessionDO implements DurableObject {
     // operator-created) stays open to anyone who already cleared the
     // router's resolveIdentity, exactly as before tenant users existed.
     const meta = await this.getMeta();
-    if (meta && !sessionAccessAllowed(identity, meta.owner_user_id)) {
+    if (meta && !sessionAccessAllowed(identity, meta.owner_user_id, meta.operator_owned === true)) {
       return new Response("forbidden", { status: 403 });
     }
 
@@ -711,6 +717,7 @@ export class SessionDO implements DurableObject {
         custom_categories: sanitizeDefinitions(message.custom_categories),
         detect_categories: message.detect_categories === true,
         ...(identity?.kind === "user" ? { owner_user_id: identity.userId } : {}),
+        ...(identity?.kind === "operator" ? { operator_owned: true as const } : {}),
       };
       await this.ctx.storage.put("meta", meta);
       await this.ctx.storage.put("alarm:purpose", "max_duration");
@@ -1026,11 +1033,16 @@ export class SessionDO implements DurableObject {
 
     await consumeWindow();
     const status = deriveAnalysisStatus(combined.failure, customFailure);
-    // TEMP DEBUG (2026-07-16, Luna trial): is a tick producing commitments live,
-    // or do they only appear in the session-end flush (force)?
+    // Tick diagnostics (originally a 2026-07-16 trial debug line): is a tick
+    // producing commitments live, or only in the session-end flush (force)?
+    // Counts only by default — commitment owners are speaker names, which is
+    // transcript-derived content and so rides behind TRANSCRIPT_CONTENT_LOGGING
+    // like every other content log.
     console.log(
       `ANALYSIS_TICK force=${force} commitments=${combined.result.commitments.length} ` +
-        `owners=[${combined.result.commitments.map((c) => c.owner).join(",")}] ` +
+        (transcriptContentLoggingEnabled(this.env)
+          ? `owners=[${combined.result.commitments.map((c) => c.owner).join(",")}] `
+          : "") +
         `asks=${combined.result.asks.length} failed=${combined.failure !== undefined}`,
     );
     await this.applyAnalysisResult(meta, combined.result, newCursor, custom, status, window);

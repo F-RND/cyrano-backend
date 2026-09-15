@@ -218,6 +218,47 @@ function pairingCSP(params: URLSearchParams): string {
   return `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`;
 }
 
+/**
+ * What the pairing page can honestly say about who is asking for the code.
+ *
+ * Dynamic client registration is open, so an attacker can register a client
+ * with any name and send a user a link to this page; if the user types their
+ * code in, the authorization code lands on the attacker's redirect and the
+ * attacker holds a token for the user's live context. The page therefore names
+ * the redirect HOST — RegistryDO only mints a code for a redirect_uri the
+ * client registered, so this is exactly where the code will go and cannot be
+ * dressed up — and shows the client's self-reported name as just that. The
+ * name is read from the client_id's signed payload without verifying the
+ * signature: it is display text, and the signature is checked where it
+ * matters, at code mint.
+ */
+export function pairingRequester(
+  params: URLSearchParams,
+): { clientName: string | null; redirectHost: string | null } {
+  let redirectHost: string | null = null;
+  try {
+    const url = new URL(params.get("redirect_uri") ?? "");
+    if (url.protocol === "https:" || url.protocol === "http:") redirectHost = url.host;
+  } catch {
+    // leave null
+  }
+  let clientName: string | null = null;
+  const match = (params.get("client_id") ?? "").match(/^cyrano_chatgpt_([A-Za-z0-9_-]+)\./);
+  if (match) {
+    try {
+      const padded = match[1]!.replaceAll("-", "+").replaceAll("_", "/")
+        + "=".repeat((4 - (match[1]!.length % 4)) % 4);
+      const parsed = JSON.parse(atob(padded)) as { clientName?: unknown };
+      if (isString(parsed.clientName) && parsed.clientName.trim()) {
+        clientName = parsed.clientName.trim().slice(0, 80);
+      }
+    } catch {
+      // leave null
+    }
+  }
+  return { clientName, redirectHost };
+}
+
 function pairingPage(params: URLSearchParams, error?: string): Response {
   const hidden = [
     "client_id",
@@ -236,6 +277,14 @@ function pairingPage(params: URLSearchParams, error?: string): Response {
   const errorBlock = error
     ? `<p class="error" role="alert">${escapeHTML(error)}</p>`
     : "";
+  const requester = pairingRequester(params);
+  const requesterBlock = requester.redirectHost
+    ? `<dl class="requester">
+      <dt>Code will be sent to</dt><dd>${escapeHTML(requester.redirectHost)}</dd>
+      <dt>Client calls itself</dt><dd>${escapeHTML(requester.clientName ?? "(unnamed)")}</dd>
+    </dl>
+    <p class="warn">Only continue if you started this connection yourself and recognise the address above. Anyone who gets your code can read your live Cyrano context.</p>`
+    : "";
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -253,12 +302,17 @@ function pairingPage(params: URLSearchParams, error?: string): Response {
     button { width: 100%; margin-top: 14px; padding: 13px 16px; border: 0; border-radius: 999px; background: #176b58; color: white; font: 650 15px inherit; cursor: pointer; }
     .error { padding: 12px 14px; border-left: 3px solid #b42318; background: color-mix(in srgb, #b42318 10%, Canvas); color: CanvasText; }
     .privacy { margin-top: 22px; font-size: 13px; }
+    .requester { margin: 18px 0 0; padding: 12px 14px; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 10px; font-size: 14px; display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; }
+    .requester dt { color: color-mix(in srgb, CanvasText 60%, transparent); }
+    .requester dd { margin: 0; font-weight: 650; overflow-wrap: anywhere; }
+    .warn { font-size: 13px; }
   </style>
 </head>
 <body>
   <main>
     <h1>Connect your AI assistant to Cyrano</h1>
     <p>In the Cyrano app, open Settings → Connections, pick your assistant (Claude, ChatGPT, or another MCP client), and create a one-time connection code.</p>
+    ${requesterBlock}
     ${errorBlock}
     <form method="post" action="/oauth/authorize">
       ${hidden}
@@ -1465,6 +1519,8 @@ export async function handleChatGPTManagementRequest(
 
 export const chatGPTMCPTesting = {
   scopes: CHATGPT_SCOPES,
+  pairingRequester,
+  pairingPage,
   tools: [GET_CONTEXT_TOOL, SEND_REPLY_TOOL, ADD_NOTE_TOOL],
   addNoteTool: ADD_NOTE_TOOL,
   getContextTool: GET_CONTEXT_TOOL,
