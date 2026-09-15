@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  agentLabelFromUrl,
   encodeIdentity,
   forwardWithIdentity,
   identityFromUrl,
@@ -31,6 +32,18 @@ describe("sessionAccessAllowed", () => {
 
   it("blocks a different tenant from a session they don't own", () => {
     expect(sessionAccessAllowed({ kind: "user", userId: "mallory" }, "alice")).toBe(false);
+  });
+
+  // 2026-09-14: a session created under AUTH_TOKEN is stamped operator_owned.
+  // On a hosted deployment those are the operator's own live conversations,
+  // and before the flag any tenant who learned the id could attach to them.
+  it("blocks every tenant from an operator-owned session", () => {
+    expect(sessionAccessAllowed({ kind: "user", userId: "alice" }, undefined, true)).toBe(false);
+    expect(sessionAccessAllowed({ kind: "operator" }, undefined, true)).toBe(true);
+  });
+
+  it("keeps a pre-flag ownerless session open (operatorOwned defaults false)", () => {
+    expect(sessionAccessAllowed({ kind: "user", userId: "alice" }, undefined, false)).toBe(true);
   });
 });
 
@@ -84,5 +97,16 @@ describe("forwardWithIdentity", () => {
     expect(forwarded.headers.get("upgrade")).toBe("websocket");
     expect(forwarded.headers.get("sec-websocket-key")).toBe("AAAAAAAAAAAAAAAAAAAAAA==");
     expect(identityFromUrl(new URL(forwarded.url))).toEqual({ kind: "operator" });
+  });
+
+  it("overwrites a caller-supplied identity marker and drops a caller-supplied agent label", () => {
+    const original = new Request("https://x/session/s1/results?_identity=operator&_agent=spoofed", {
+      method: "POST",
+      headers: { authorization: "Bearer abc" },
+    });
+    const forwarded = forwardWithIdentity(original, { kind: "user", userId: "alice-id" });
+    const url = new URL(forwarded.url);
+    expect(identityFromUrl(url)).toEqual({ kind: "user", userId: "alice-id" });
+    expect(agentLabelFromUrl(url)).toBeNull();
   });
 });
