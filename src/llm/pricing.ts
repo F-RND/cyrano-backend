@@ -39,10 +39,11 @@
  */
 
 import {
-  OPENROUTER_BASE_URL,
   usageMicrosAt,
   type LlmProvider,
   type LlmUsage,
+  asProvider,
+  defaultBaseUrlFor,
 } from "./client.js";
 import type { Env } from "../env.js";
 
@@ -412,16 +413,21 @@ export function pricingOptionsFromEnv(
   const configuredFlatPerM: Partial<Record<BillingProvider, number>> = {};
 
   const fallbackRate = positiveNumber(env.FALLBACK_RATE_USD_PER_M);
-  if (fallbackRate !== undefined && env.FALLBACK_PROVIDER) {
-    const tag = env.FALLBACK_PROVIDER;
-    if (tag === "anthropic" || tag === "openrouter") {
+  if (fallbackRate !== undefined) {
+    // Same parser as fallbackLegFor, so an alias the leg accepts ("openai")
+    // prices the same account the leg bills.
+    const tag = asProvider(env.FALLBACK_PROVIDER);
+    if (tag) {
       // Resolve the same way a served leg will, so the configured rate lands on
       // the account the leg actually bills rather than on the wire-protocol tag.
-      // The base-URL defaults mirror env.ts's FALLBACK_DEFAULTS: a deployment
-      // that sets only FALLBACK_PROVIDER still resolves the same host the leg
-      // will call, so its configured rate is not quietly attached to "unknown".
-      const defaultBase = tag === "openrouter" ? OPENROUTER_BASE_URL : undefined;
-      const provider = billingProviderFor({ provider: tag, baseUrl: env.FALLBACK_BASE_URL || defaultBase });
+      // The base-URL default is the leg's own (defaultBaseUrlFor, keyed on the
+      // raw tag): a deployment that sets only FALLBACK_PROVIDER still resolves
+      // the same host the leg will call, so its configured rate is not quietly
+      // attached to "unknown" — or, for the "openai" alias, to OpenRouter.
+      const provider = billingProviderFor({
+        provider: tag,
+        baseUrl: env.FALLBACK_BASE_URL || defaultBaseUrlFor(env.FALLBACK_PROVIDER),
+      });
       configuredFlatPerM[provider] = fallbackRate;
     }
   }
