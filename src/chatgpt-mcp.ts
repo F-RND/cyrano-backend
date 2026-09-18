@@ -612,6 +612,21 @@ async function listSessions(
   };
 }
 
+/** The /context query a `cyrano_get_session` read forwards to the device.
+ *
+ * No `search` pass-through: the device's /context read ignores unknown
+ * params, so advertising a filter here would be promising spans the tool
+ * cannot produce. Add it only when the local handler actually implements it.
+ *
+ * `transcript: "full"` is load-bearing. The device's /context defaults to the
+ * recent tail (its live-poll shape), and this tool's description promises the
+ * whole session — a 60-minute call was coming back as its last ~15 minutes
+ * with nothing saying so. The device still applies the session's storage
+ * level, so "full" never means more than it keeps. */
+function sessionOriginQuery(sessionId: string): Record<string, string> {
+  return { session: sessionId, transcript: "full" };
+}
+
 async function getSession(
   env: Env,
   identity: Identity,
@@ -627,11 +642,7 @@ async function getSession(
       account: accountEcho(identity, connectionLabel),
     };
   }
-  // No `search` pass-through: the device's /context read serves the whole
-  // session and ignores unknown params, so advertising a filter here would be
-  // promising spans the tool cannot produce. Add it only when the local
-  // handler actually implements it.
-  const query: Record<string, string> = { session: sessionId };
+  const query = sessionOriginQuery(sessionId);
 
   const response = await inbox(env, identity).fetch("https://inbox/origin", {
     method: "POST",
@@ -1529,6 +1540,7 @@ export const chatGPTMCPTesting = {
   listenDirective: LISTEN_DIRECTIVE,
   watchNotesDirective,
   contextQueryFromArgs,
+  sessionOriginQuery,
   inactiveReason,
   inactiveDetail,
   citedSeqs,

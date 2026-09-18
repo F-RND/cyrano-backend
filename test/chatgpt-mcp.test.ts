@@ -308,3 +308,16 @@ describe("Empty reads explain themselves", () => {
     expect(Object.keys(workflowSchema.properties)).toContain("account");
   });
 });
+
+describe("cyrano_get_session origin read", () => {
+  it("asks the device for the whole transcript, not its live-poll tail", () => {
+    // The device's /context defaults to the most recent 80 lines. The tool
+    // promises "the whole session as the user's sharing rules allow", so the
+    // forwarded query must say so — a 60-minute call came back as its last
+    // ~15 minutes with nothing in the payload saying it was cut.
+    expect(chatGPTMCPTesting.sessionOriginQuery("sess-1")).toEqual({
+      session: "sess-1",
+      transcript: "full",
+    });
+  });
+});
