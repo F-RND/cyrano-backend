@@ -22,7 +22,7 @@ const CHATGPT_SCOPES = ["context:read", "context:write"] as const;
  */
 const CONNECTOR_CLIENTS: Record<string, { label: string; installUrl?: string }> = {
   chatgpt: { label: "ChatGPT", installUrl: "https://chatgpt.com/#settings/Connectors" },
-  claude: { label: "Claude", installUrl: "https://claude.ai/settings/connectors" },
+  claude: { label: "Claude", installUrl: "https://claude.ai/new#customize/connectors" },
   other: { label: "MCP client" },
 };
 
