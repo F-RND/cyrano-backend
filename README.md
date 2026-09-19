@@ -164,6 +164,15 @@ Only meaningful when sessions have an owning user (Stripe or App Store entitleme
 | `APPLE_ENVIRONMENT` | var | — | Exact accepted environment, normally `Production` or `Sandbox`. |
 | `FREE_COLD_ENROLLMENT_ENABLED` | var | `false` | Enables token-less `/free-cold/enroll`. |
 
+### Bug-report notification (optional, off by default)
+
+`POST /bug-report` (the in-app Settings → Report a Bug form) always stores the report in the operator queue read by `GET /bug-reports`. Unset, nothing announces a new report. Set, every accepted report is also relayed as a JSON POST (`{ kind: "bug-report", source: "app", id, created_at, category, description, email?, diagnostics? }`) after it is stored, off the request's critical path — the reporter's submit succeeds whether or not the relay does.
+
+| Name | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| `BUG_REPORT_NOTIFY_URL` | var | — | `https://` URL that receives the relay. Plain `http://` is refused. |
+| `BUG_REPORT_NOTIFY_TOKEN` | secret | — | Sent as `Authorization: Bearer …` so the receiver can refuse anyone else. |
+
 ### Shadow price testing (optional, off by default)
 
 Fans each hosted analysis window out to additional providers on the operator's keys for measurement. Adds egress and spend; leave disabled unless deliberately evaluating providers with synthetic data.
@@ -183,6 +192,7 @@ Every optional integration either returns 503 or is skipped entirely when its co
 - Shadow price testing across additional providers (`PRICE_TEST_ENABLED`)
 - App Store link and notification routes (`APP_STORE_ENABLED`, plus `APPLE_BUNDLE_IDS` and `APPLE_ENVIRONMENT`)
 - Token-less free-tier enrollment (`FREE_COLD_ENROLLMENT_ENABLED`)
+- The bug-report relay (`BUG_REPORT_NOTIFY_URL`)
 - Stripe checkout and webhooks, trials, and the hosted paid model (their secrets)
 - Cloudflare observability (`observability.enabled`)
 

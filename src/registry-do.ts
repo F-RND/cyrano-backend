@@ -7,12 +7,13 @@ import {
   bugReportKey,
   MAX_BODY_BYTES,
   MAX_STORED_REPORTS,
+  notifyBugReport,
   RATE_LIMIT_PER_DAY,
   RATE_LIMIT_PREFIX,
   rateLimitKey,
   sanitizeBugReport,
   utcDayBucket,
-  type SanitizedBugReport,
+  type StoredBugReport,
 } from "./bugreport.js";
 import {
   applyUsage,
@@ -2260,7 +2261,8 @@ export class RegistryDO implements DurableObject {
       .join("");
     const storageKey = bugReportKey(now, nonce);
     const id = storageKey.slice(BUG_REPORT_PREFIX.length);
-    await this.ctx.storage.put(storageKey, { id, createdAt: now, ...report });
+    const stored: StoredBugReport = { id, createdAt: now, ...report };
+    await this.ctx.storage.put(storageKey, stored);
 
     // Ring buffer: keys are chronological, so capping is delete-from-the-front.
     const all = await this.ctx.storage.list({ prefix: BUG_REPORT_PREFIX });
@@ -2268,6 +2270,12 @@ export class RegistryDO implements DurableObject {
       const excess = [...all.keys()].slice(0, all.size - MAX_STORED_REPORTS);
       await this.ctx.storage.delete(excess);
     }
+
+    // Operator notification (BUG_REPORT_NOTIFY_URL), after the store and off
+    // the critical path: the reporter's 200 never waits on the relay, and a
+    // dead relay never loses a report — it is already in the queue above.
+    // notifyBugReport() is a no-op when unconfigured and never throws.
+    this.ctx.waitUntil(notifyBugReport(this.env, stored));
 
     return Response.json({ ok: true, id });
   }
@@ -2278,7 +2286,7 @@ export class RegistryDO implements DurableObject {
       Number.isFinite(limitParam) && limitParam > 0
         ? Math.min(Math.floor(limitParam), MAX_STORED_REPORTS)
         : 200;
-    const stored = await this.ctx.storage.list<SanitizedBugReport & { id: string; createdAt: number }>({
+    const stored = await this.ctx.storage.list<StoredBugReport>({
       prefix: BUG_REPORT_PREFIX,
       reverse: true,
       limit,

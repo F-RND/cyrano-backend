@@ -179,6 +179,21 @@ export interface Env {
   // keeps this absent/false; a developer may opt a disposable test deployment
   // in while diagnosing model attribution or comparing shadow outputs.
   TRANSCRIPT_CONTENT_LOGGING?: string;
+
+  // --- In-app bug reports (src/bugreport.ts) ---
+  // Optional operator notification. Unset → accepted reports wait silently in
+  // the queue until someone polls GET /bug-reports. Set to an https URL → every
+  // accepted POST /bug-report is ALSO relayed there as a JSON POST
+  // ({ kind: "bug-report", source: "app", id, created_at, category,
+  // description, email?, diagnostics? }), after the report is stored and off
+  // the request's critical path: the submit succeeds whether or not the relay
+  // does. Point it at whatever turns JSON into a ping — the reference
+  // deployment uses its landing Worker's /bug-report route, which emails the
+  // operator with a subject distinct from the site's other forms.
+  BUG_REPORT_NOTIFY_URL?: string;
+  // Secret sent as `Authorization: Bearer …` on that relay so the receiver can
+  // refuse anyone else. Set with `wrangler secret put BUG_REPORT_NOTIFY_TOKEN`.
+  BUG_REPORT_NOTIFY_TOKEN?: string;
 }
 
 /** Fail-closed gate for any log or diagnostic artifact containing user text. */

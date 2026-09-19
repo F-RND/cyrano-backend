@@ -36,6 +36,10 @@
     // APPLE_ENVIRONMENT; neither has a checked-in default.
     "APP_STORE_ENABLED": "false",
     // Token-less free-cold identity minting is an explicit opt-in.
-    "FREE_COLD_ENROLLMENT_ENABLED": "false"
+    "FREE_COLD_ENROLLMENT_ENABLED": "false",
+    // Where an accepted POST /bug-report is relayed (https URL) so the operator
+    // hears about it; empty keeps reports waiting silently in GET /bug-reports.
+    // Pair with the BUG_REPORT_NOTIFY_TOKEN secret.
+    "BUG_REPORT_NOTIFY_URL": ""
   }
 }
