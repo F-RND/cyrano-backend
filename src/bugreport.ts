@@ -120,3 +120,108 @@ export const BUG_REPORT_PREFIX = "bugreport:";
 export function bugReportKey(nowMs: number, nonce: string): string {
   return `${BUG_REPORT_PREFIX}${String(nowMs).padStart(14, "0")}-${nonce}`;
 }
+
+// ---- operator notification (BUG_REPORT_NOTIFY_URL) --------------------------
+//
+// Storing a report is the only thing /bug-report guarantees. Without this
+// relay the queue is silent: nothing tells the operator a report exists until
+// they poll GET /bug-reports. When BUG_REPORT_NOTIFY_URL is set, every ACCEPTED
+// report is also POSTed there as JSON, after it is stored and off the request's
+// critical path — the submit succeeds whether or not the relay does. The body
+// is the stored record plus a `kind` discriminator, so the receiver (an email
+// relay, a chat webhook, a ticket tracker) can never mistake it for any other
+// kind of inbound mail — and carries nothing the queue does not already hold.
+
+/** The stored-record shape (what GET /bug-reports returns per row). */
+export type StoredBugReport = SanitizedBugReport & { id: string; createdAt: number };
+
+export const BUG_REPORT_NOTIFICATION_KIND = "bug-report";
+/** Where the report was authored. The in-app form is the only submitter today;
+ * a relay receiver uses it to label the report ("app"), never to route it. */
+export const BUG_REPORT_NOTIFICATION_SOURCE = "app";
+
+export interface BugReportNotification {
+  kind: typeof BUG_REPORT_NOTIFICATION_KIND;
+  source: typeof BUG_REPORT_NOTIFICATION_SOURCE;
+  id: string;
+  /** ISO 8601, from the stored `createdAt`. */
+  created_at: string;
+  category: BugReportCategory;
+  description: string;
+  email?: string;
+  diagnostics?: BugReportDiagnostics;
+}
+
+/** The relay body for one stored report. Explicit field list on purpose: a
+ * new stored field never leaks to the receiver by accident. */
+export function bugReportNotification(stored: StoredBugReport): BugReportNotification {
+  const body: BugReportNotification = {
+    kind: BUG_REPORT_NOTIFICATION_KIND,
+    source: BUG_REPORT_NOTIFICATION_SOURCE,
+    id: stored.id,
+    created_at: new Date(stored.createdAt).toISOString(),
+    category: stored.category,
+    description: stored.description,
+  };
+  if (stored.email) body.email = stored.email;
+  if (stored.diagnostics) body.diagnostics = stored.diagnostics;
+  return body;
+}
+
+/** Upper bound on one relay attempt. Runs off the critical path, so this only
+ * caps how long a dead receiver keeps the DO's background work open. */
+export const NOTIFY_TIMEOUT_MS = 10_000;
+
+export interface BugReportNotifyEnv {
+  BUG_REPORT_NOTIFY_URL?: string;
+  BUG_REPORT_NOTIFY_TOKEN?: string;
+}
+
+/** True when the operator has configured a relay target (an https URL). A
+ * plain-http URL is refused: the body carries a user's own words and reply
+ * address, and a leaked-in-transit relay is worse than a silent queue. */
+export function bugReportNotifyConfigured(env: BugReportNotifyEnv): boolean {
+  const url = env.BUG_REPORT_NOTIFY_URL?.trim() ?? "";
+  return url.startsWith("https://");
+}
+
+/**
+ * Relays one stored report to BUG_REPORT_NOTIFY_URL. Resolves true when the
+ * receiver acknowledged (2xx), false when unconfigured, refused, or unreachable
+ * — never throws, so a caller can hand it to waitUntil without a guard. Failure
+ * logs carry the report id and the receiver's status only; the description is
+ * user text and stays out of logs.
+ */
+export async function notifyBugReport(
+  env: BugReportNotifyEnv,
+  stored: StoredBugReport,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  if (!bugReportNotifyConfigured(env)) return false;
+  const url = (env.BUG_REPORT_NOTIFY_URL as string).trim();
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  const token = env.BUG_REPORT_NOTIFY_TOKEN?.trim();
+  if (token) headers.authorization = `Bearer ${token}`;
+  try {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(bugReportNotification(stored)),
+      signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
+    });
+    if (response.ok) return true;
+    console.error(
+      JSON.stringify({ message: "bug report notify refused", id: stored.id, status: response.status }),
+    );
+    return false;
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        message: "bug report notify failed",
+        id: stored.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return false;
+  }
+}
