@@ -7,7 +7,7 @@ import { forwardWithAgent, forwardWithIdentity, resolveAgentAuth, resolveIdentit
 import { pingLlm, type LlmConfig } from "./llm/client.js";
 import { resolveAnalysisLlmConfig, resolveStatelessLlmConfig, ClientLlmSelectionError } from "./llm/hosted-config.js";
 import { createSpendLedger, isEmptyDelta, spendDeltaToWire } from "./llm/spend.js";
-import { pricingOptionsFromEnv } from "./llm/pricing.js";
+import { priceTable, pricingOptionsFromEnv } from "./llm/pricing.js";
 import type { UsageDelta } from "./usage.js";
 import { FREE_COLD_PLAN, sessionAnalysisAccess } from "./entitlement.js";
 import {
@@ -105,6 +105,21 @@ export function costsQuery(url: URL): string {
   return query ? `?${query}` : "";
 }
 
+/**
+ * The query string GET /costs/sessions forwards to the registry's internal
+ * `_session_costs`. Same allowlist-and-re-encode discipline as
+ * {@link costsQuery}: two params exist and two params travel.
+ */
+export function sessionCostsQuery(url: URL): string {
+  const out = new URLSearchParams();
+  const limit = url.searchParams.get("limit");
+  if (limit !== null) out.set("limit", limit.slice(0, 16));
+  const userId = url.searchParams.get("user_id");
+  if (userId !== null && userId.length > 0) out.set("user_id", userId.slice(0, 128));
+  const query = out.toString();
+  return query ? `?${query}` : "";
+}
+
 /** The only operations an agent key may perform, on either agent route form. */
 export function isAllowedAgentOperation(request: Request, suffix: string): boolean {
   if (request.method === "GET" && suffix === "/context") return true;
@@ -153,9 +168,16 @@ function contextDisabledResponse(): Response {
  * is the whole point of D5. It cannot raise anyone's spend — `micros` is the
  * sum of the priced legs, and a BYOK call never produces one.
  */
-async function reportSpend(env: Env, identity: Identity, delta: UsageDelta): Promise<void> {
-  if (identity.kind !== "user") return;
+async function reportSpend(env: Env, identity: Identity, delta: UsageDelta, route: string): Promise<void> {
   if (isEmptyDelta(delta)) return;
+  // One content-free line per LLM-bearing request, so a stateless call's cost
+  // is visible next to the per-session `SESSION_COST` lines while a candidate
+  // model is under test — these routes have no session to roll up into. Route,
+  // model, tokens and micro-dollars only: no text, no ids. Logged for every
+  // identity, the operator's own included, because the operator's own test
+  // calls are exactly the ones being measured and they never reach a meter.
+  console.log(`LLM_COST_REQUEST ${JSON.stringify({ route, identity: identity.kind, ...spendDeltaToWire(delta) })}`);
+  if (identity.kind !== "user") return;
   try {
     const registry = env.REGISTRY_DO.get(env.REGISTRY_DO.idFromName("registry"));
     await registry.fetch("https://registry/_usage", {
@@ -439,7 +461,7 @@ export default {
           else probeLedger.recordServed(usage, leg);
         },
       });
-      await reportSpend(env, identity, probeLedger.take());
+      await reportSpend(env, identity, probeLedger.take(), "/health/llm");
       if (probe.ok) {
         return Response.json({ ok: true, model: env.LLM_MODEL });
       }
@@ -544,7 +566,7 @@ export default {
         text,
         modes,
       );
-      await reportSpend(env, identity, ledger.take());
+      await reportSpend(env, identity, ledger.take(), "/dictation/polish");
       return Response.json({ polished_text: polished });
     }
 
@@ -558,7 +580,9 @@ export default {
     // storage, no analytics. A day document is the most concentrated artifact
     // Cyrano ever handles (a whole day's extractions in one payload), and the
     // in-app privacy claim in DataFlowView says exactly this. Do not add a log
-    // line here.
+    // line here. (reportSpend's `LLM_COST_REQUEST` line is the one thing this
+    // route logs, and it carries route, model, token COUNTS and micro-dollars —
+    // never text.)
     if (request.method === "POST" && url.pathname === "/context/refine") {
       const body = (await request.json().catch(() => null)) as {
         text?: string;
@@ -607,13 +631,13 @@ export default {
         // so never ran on the failure path — our own spend was silently
         // under-counted on exactly the calls most likely to be expensive (a
         // truncated or refused pass pays for every output token it produced).
-        await reportSpend(env, identity, ledger.take());
+        await reportSpend(env, identity, ledger.take(), "/context/refine");
         return Response.json({ error: "refine_failed" }, { status: 502 });
       }
       // A failed pass still burned tokens; meter what was actually spent, on the
       // same rule as polish (our key + a tenant identity only). Metering must
       // never break the pass, so any registry hiccup drops the delta.
-      await reportSpend(env, identity, ledger.take());
+      await reportSpend(env, identity, ledger.take(), "/context/refine");
       return Response.json({
         revised_text: refined.revisedText,
         changed: refined.changed,
@@ -687,7 +711,7 @@ export default {
       // reanalysis windows a whole transcript, so this delta can legitimately
       // carry several legs — including two providers, if the fallback picked up
       // partway through an outage.
-      await reportSpend(env, identity, ledger.take());
+      await reportSpend(env, identity, ledger.take(), "/analyze");
 
       if (outcome.failure && outcome.windowsRun === 0) {
         return Response.json(
@@ -780,14 +804,14 @@ export default {
         // (refusal, truncation, unparseable tool call) has already been billed
         // for its output tokens, so the delta is reported before the error goes
         // out rather than discarded with it.
-        await reportSpend(env, identity, ledger.take());
+        await reportSpend(env, identity, ledger.take(), "/ask");
         return Response.json(
           { error: "ask_failed", message: err instanceof Error ? err.message : String(err) },
           { status: 502 },
         );
       }
 
-      await reportSpend(env, identity, ledger.take());
+      await reportSpend(env, identity, ledger.take(), "/ask");
 
       return Response.json({ answer, model: config.model });
     }
@@ -899,6 +923,34 @@ export default {
       return registry.fetch(`https://registry/_costs${costsQuery(url)}`);
     }
 
+    // Per-SESSION cost (operator-only, backend/src/session-cost.ts): the most
+    // recent ended sessions, newest first, each with what it cost on our key by
+    // model and by pass, its duration and transcript size ($/minute, $/1k
+    // words), and which models ran unpriced — plus a per-model rollup across
+    // the page. The complement of GET /costs (per subject, per period): this is
+    // per conversation, which is the unit a hosted-model decision is made in.
+    // `?limit=` (default 50, max 200), `?user_id=` to narrow to one tenant.
+    // A LIVE session is not listed until it ends; read it at
+    // GET /session/:id/cost.
+    if (request.method === "GET" && url.pathname === "/costs/sessions") {
+      if (identity.kind !== "operator") {
+        return new Response("forbidden", { status: 403 });
+      }
+      const registry = env.REGISTRY_DO.get(env.REGISTRY_DO.idFromName("registry"));
+      return registry.fetch(`https://registry/_session_costs${sessionCostsQuery(url)}`);
+    }
+
+    // The rate table itself (operator-only): every listed provider+model with
+    // its USD per 1M tokens, basis and citation, plus the estimate anything
+    // unlisted prices at. "Is candidate X priced, and at what?" without reading
+    // llm/pricing.ts. Pure data, no DO.
+    if (request.method === "GET" && url.pathname === "/costs/rates") {
+      if (identity.kind !== "operator") {
+        return new Response("forbidden", { status: 403 });
+      }
+      return Response.json({ generated_at: new Date().toISOString(), ...priceTable() });
+    }
+
     // Per-user usage/cost read (paid hosted tier).
     // A tenant reads their own meter; the operator may read any tenant's via
     // ?user_id=. Forwarded to the registry's internal _usage read (which is
@@ -962,6 +1014,12 @@ export default {
     }
 
     const sessionId = match[1]!;
+    // The per-session cost read is an operator report, like GET /costs and
+    // GET /costs/sessions: the DO's ownership gate would let the owning tenant
+    // read it too, and nothing in it is theirs to act on.
+    if (match[2] === "/cost" && identity.kind !== "operator") {
+      return new Response("forbidden", { status: 403 });
+    }
     const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
     return stub.fetch(forwardWithIdentity(request, identity));
   },

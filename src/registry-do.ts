@@ -52,6 +52,15 @@ import {
   type CostReport,
 } from "./costs.js";
 import { appleSubscriptionId, appleUserLabel } from "./appstore.js";
+import {
+  clampSessionCostLimit,
+  SESSION_COST_KEY_PREFIX,
+  SESSION_COST_RETAINED_ROWS,
+  sessionCostRowFromWire,
+  sessionCostStorageKey,
+  summarizeSessionCosts,
+  type SessionCostRow,
+} from "./session-cost.js";
 import type { Env } from "./env.js";
 
 interface StoredKey {
@@ -498,6 +507,15 @@ export class RegistryDO implements DurableObject {
     // Worker's operator-only GET /costs — same discipline as /_adoption.
     if (request.method === "GET" && url.pathname === "/_costs") {
       return this.costReport(url);
+    }
+    // Per-session cost rows (session-cost.ts). A Session DO files its finished
+    // row here at session end; the Worker's operator-only GET /costs/sessions
+    // reads them back newest-first. Internal-only, both directions.
+    if (request.method === "POST" && url.pathname === "/_session_cost") {
+      return this.fileSessionCost(request);
+    }
+    if (request.method === "GET" && url.pathname === "/_session_costs") {
+      return this.sessionCostReport(url);
     }
     // In-app bug reports (bugreport.ts). Internal-only, reached solely via the
     // Worker's token-less POST /bug-report (submit) and operator-only
@@ -2188,6 +2206,67 @@ export class RegistryDO implements DurableObject {
       subjects,
     };
     return Response.json(report);
+  }
+
+  // ---- per-session cost rows (session-cost.ts) ----
+
+  /**
+   * A Session DO files its finished cost row here at session end. The row is
+   * re-validated field by field (sessionCostRowFromWire) — this route is
+   * DO-to-DO, but a body is a body — and stored under a key that sorts by end
+   * time, so the listing below is a reverse prefix scan. The set is BOUNDED at
+   * {@link SESSION_COST_RETAINED_ROWS}: after every insert the oldest rows past
+   * the cap are deleted, so a busy deployment holds a rolling window of recent
+   * sessions and the registry never grows without limit for this.
+   */
+  private async fileSessionCost(request: Request): Promise<Response> {
+    const row = sessionCostRowFromWire(await request.json().catch(() => null));
+    if (!row) return Response.json({ error: "bad_row" }, { status: 400 });
+    const endedAt = row.ended_at ? Date.parse(row.ended_at) : Date.now();
+    await this.ctx.storage.put(sessionCostStorageKey(endedAt, row.session_id), row);
+
+    // Prune. Keys sort oldest-first; list a little past the cap so one call
+    // sees everything that has to go (normally one row).
+    const keys = [
+      ...(
+        await this.ctx.storage.list({
+          prefix: SESSION_COST_KEY_PREFIX,
+          limit: SESSION_COST_RETAINED_ROWS + 50,
+        })
+      ).keys(),
+    ];
+    if (keys.length > SESSION_COST_RETAINED_ROWS) {
+      for (const key of keys.slice(0, keys.length - SESSION_COST_RETAINED_ROWS)) {
+        await this.ctx.storage.delete(key);
+      }
+    }
+    return Response.json({ ok: true });
+  }
+
+  /**
+   * Recent ended sessions, newest first, with a per-model rollup across them.
+   * `?limit=` caps the rows (default 50, max 200); `?user_id=` narrows to one
+   * tenant's sessions (an operator tenant's sessions have no owner and match
+   * `user_id=` never — read them unfiltered). A live session is not here yet:
+   * read it at GET /session/:id/cost.
+   */
+  private async sessionCostReport(url: URL): Promise<Response> {
+    const limit = clampSessionCostLimit(url.searchParams.get("limit"));
+    const userId = url.searchParams.get("user_id");
+    const rows: SessionCostRow[] = [];
+    // Newest first. When filtering by owner we may have to look past `limit`
+    // rows to fill the page; the retained set bounds that walk.
+    const page = await this.ctx.storage.list<SessionCostRow>({
+      prefix: SESSION_COST_KEY_PREFIX,
+      reverse: true,
+      limit: userId ? SESSION_COST_RETAINED_ROWS : limit,
+    });
+    for (const row of page.values()) {
+      if (userId && row.owner_user_id !== userId) continue;
+      rows.push(row);
+      if (rows.length >= limit) break;
+    }
+    return Response.json(summarizeSessionCosts(rows, { now: Date.now(), limit }));
   }
 
   /** Every value under a prefix, paged. `storage.list` caps at 1000 entries per

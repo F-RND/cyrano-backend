@@ -132,9 +132,11 @@ export interface Env {
 
   // Flat rate for whatever provider FALLBACK_PROVIDER names, resolved to the
   // billing account its base URL points at. Exists so configuring the fallback
-  // on OpenRouter (no per-model card is maintained for its ~300 models) is not
-  // silently metered at the defensive estimate. An unpriced provider without
-  // this setting prices "estimated" and says so.
+  // on an OpenRouter model that is NOT on the rate card is not silently metered
+  // at the defensive estimate. A model that IS listed (llm/pricing.ts
+  // OPENROUTER_LISTINGS — the candidates we run or evaluate) keeps its listed
+  // per-model rate; this flat rate never overrides a listed one. An unlisted
+  // model without this setting prices "estimated" and says so.
   FALLBACK_RATE_USD_PER_M?: string;
 
   // --- Operator cost report (backend/src/costs.ts, GET /costs) ---

@@ -30,24 +30,41 @@
  * on this to stay correct across an await (see flushLlmSpend).
  */
 
-import type { LlmUsage, ServedLeg } from "./client.js";
+import type { LlmCallInfo, LlmUsage, ServedLeg } from "./client.js";
 import { priceUsage, worseBasis, type PricedUsage, type PricingOptions } from "./pricing.js";
 import { isShadowLeg, normalizeUsageDelta, type UsageDelta, type UsageLeg } from "../usage.js";
+
+/**
+ * A second reader of everything the ledger records, told about each block AS
+ * IT IS PRICED — the same {@link PricedUsage} the ledger folds into its own
+ * buckets, so the two can never disagree by a micro-dollar. The Session DO
+ * hands its per-session cost ledger (session-cost.ts) in here, which is how
+ * one `onUsage` callback feeds both the per-user meter (drained to the
+ * registry) and the per-session breakdown (kept with the session) without any
+ * call site having to remember to record twice. A missing observer is a no-op.
+ */
+export interface SpendObserver {
+  onServed(priced: PricedUsage, call: LlmCallInfo | undefined): void;
+  onByok(call: LlmCallInfo | undefined): void;
+  onShadow(priced: PricedUsage): void;
+}
 
 export interface SpendLedger {
   /**
    * A usage block that spent OUR money, priced at the leg that actually served
    * it. `leg` is the one `onUsage` handed us — on a failed-over call that is the
-   * FALLBACK's provider+model, never the primary's (BAR I5).
+   * FALLBACK's provider+model, never the primary's (BAR I5). `call` names the
+   * pass (the forced tool) for the per-session breakdown; the per-user meter
+   * does not key on it.
    */
-  recordServed(usage: LlmUsage, leg: ServedLeg): void;
+  recordServed(usage: LlmUsage, leg: ServedLeg, call?: LlmCallInfo): void;
   /**
    * A usage block on a client-supplied key. Contributes exactly zero
    * micro-dollars and increments a call count instead (defect D5). There is no
    * parameter for a price here on purpose: no code path can make a BYOK call
    * cost us anything.
    */
-  recordByok(): void;
+  recordByok(call?: LlmCallInfo): void;
   /**
    * A usage block WE chose to spend on this subject's traffic that the subject
    * never asked for — the shadow price-test fan-out (analysis/price-test.ts),
@@ -77,7 +94,7 @@ function legKey(provider: string, model: string, shadow: boolean): string {
   return `${shadow ? "s" : "c"}|${provider} ${model}`;
 }
 
-export function createSpendLedger(opts?: PricingOptions): SpendLedger {
+export function createSpendLedger(opts?: PricingOptions, observer?: SpendObserver): SpendLedger {
   const legs = new Map<string, UsageLeg>();
   let byokCalls = 0;
 
@@ -118,14 +135,19 @@ export function createSpendLedger(opts?: PricingOptions): SpendLedger {
   };
 
   return {
-    recordServed(usage, leg) {
-      add(priceUsage(usage, leg, opts), false);
+    recordServed(usage, leg, call) {
+      // Priced ONCE; the observer sees the same block the bucket absorbs.
+      const priced = priceUsage(usage, leg, opts);
+      add(priced, false);
+      observer?.onServed(priced, call);
     },
-    recordByok() {
+    recordByok(call) {
       byokCalls += 1;
+      observer?.onByok(call);
     },
     recordShadow(priced) {
       add(priced, true);
+      observer?.onShadow(priced);
     },
     take() {
       const out = snapshot();

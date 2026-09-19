@@ -66,7 +66,11 @@ describe("billingProviderFor — the account that gets the invoice, not the wire
 describe("D1: configured and unconfigured accounts produce different prices", () => {
   // 1,000 fresh input + 500 output, no cache tokens.
   const usage: LlmUsage = { ...ZERO, input_tokens: 1000, output_tokens: 500 };
-  const model = "openai/gpt-oss-120b";
+  // An OpenRouter model NOT on the card (llm/pricing.ts OPENROUTER_LISTINGS),
+  // so the operator's flat rate is what prices it. (`openai/gpt-oss-120b` used
+  // to play this part; it is listed now, and a listed model keeps its own
+  // rate — see "a listed OpenRouter candidate keeps its listed rate" below.)
+  const model = "some-lab/unlisted-model";
 
   it("prices a configured OpenRouter fallback separately from an unconfigured endpoint", () => {
     const configured = priceUsage(
@@ -135,9 +139,28 @@ describe("I4: nothing is priced silently", () => {
     // means "this is a bill" — it is the single rate that prices essentially
     // all real hosted paid spend, so it is exactly the one that drives
     // exact_fraction toward a number nobody can back up.
-    expect(rateFor("openai", "gpt-5.6-luna").basis).toBe("configured");
-    // The DOLLARS are unchanged: this is an honesty fix, not a repricing.
-    expect(rateFor("openai", "gpt-5.6-luna").rate).toMatchObject({ inputPerM: 1, outputPerM: 6 });
+    //
+    // 2026-09-18: VERIFIED against OpenAI's price list
+    // (developers.openai.com/api/docs/pricing): Luna is $0.20 / $1.20 per 1M
+    // with cached input at $0.02 (0.1x). The carried-forward $1/$6 was 5x too
+    // high — every hosted paid session was over-counted 5x, and every budget
+    // candidate would have looked 5x better against it than it is. Now `exact`,
+    // with the source cited on the card entry.
+    expect(rateFor("openai", "gpt-5.6-luna").basis).toBe("exact");
+    expect(rateFor("openai", "gpt-5.6-luna").rate).toEqual({
+      inputPerM: 0.2,
+      outputPerM: 1.2,
+      cacheWriteMultiplier: 1,
+      cacheReadMultiplier: 0.1,
+    });
+    // 1M fresh input + 1M cached input + 1M output at Luna's list price:
+    // 200,000 + 20,000 + 1,200,000 = 1,420,000 micro-$ ($1.42).
+    expect(
+      priceUsage(
+        { ...ZERO, input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        { provider: "openrouter", model: "gpt-5.6-luna", baseUrl: "https://api.openai.com/v1" },
+      ),
+    ).toMatchObject({ provider: "openai", micros: 1_420_000, basis: "exact" });
   });
 
   it("treats an Object.prototype key as an UNKNOWN model, on every published card", () => {
@@ -262,14 +285,14 @@ describe("configured rates from env", () => {
     // 1M input + 1M output at a flat 0.08/1M = 80,000 + 80,000 micro-dollars.
     const priced = priceUsage(
       { ...ZERO, input_tokens: 1_000_000, output_tokens: 1_000_000 },
-      { provider: "openrouter", model: "openai/gpt-oss-120b", baseUrl: "https://openrouter.ai/api/v1" },
+      { provider: "openrouter", model: "some-lab/unlisted-model", baseUrl: "https://openrouter.ai/api/v1" },
       opts,
     );
     expect(priced.micros).toBe(160_000);
     expect(priced.basis).toBe("configured");
   });
 
-  it("prices an OpenRouter FALLBACK leg at its configured rate instead of the Sonnet estimate", () => {
+  it("prices an UNLISTED OpenRouter FALLBACK leg at its configured rate instead of the Sonnet estimate", () => {
     // Without this knob, an unlisted model uses the defensive estimate.
     const opts = pricingOptionsFromEnv({
       FALLBACK_PROVIDER: "openrouter",
@@ -277,8 +300,24 @@ describe("configured rates from env", () => {
     } as never);
     const usage: LlmUsage = { ...ZERO, input_tokens: 1000, output_tokens: 200 };
     // 0.5 * 1000 + 0.5 * 200 = 500 + 100 = 600 micro-dollars.
-    const priced = priceUsage(usage, { provider: "openrouter", model: "z-ai/glm-4.6", baseUrl: "https://openrouter.ai/api/v1" }, opts);
+    const priced = priceUsage(usage, { provider: "openrouter", model: "some-lab/unlisted-model", baseUrl: "https://openrouter.ai/api/v1" }, opts);
     expect(priced).toMatchObject({ provider: "openrouter", micros: 600, basis: "configured" });
+  });
+
+  it("a listed OpenRouter candidate keeps its listed rate even when a flat rate is set", () => {
+    // The flat rate is per PROVIDER. An operator who set it at $0.15 for a
+    // gpt-oss fallback and then points HOSTED_PAID_MODEL at z-ai/glm-4.6 on the
+    // same account must not have GLM priced at $0.15 flat — that would
+    // under-count the exact comparison this table exists for by 3–10x. Same
+    // rule as the Anthropic/OpenAI cards: a listed model keeps its own entry.
+    const opts = pricingOptionsFromEnv({
+      FALLBACK_PROVIDER: "openrouter",
+      FALLBACK_RATE_USD_PER_M: "0.15",
+    } as never);
+    const usage: LlmUsage = { ...ZERO, input_tokens: 1000, output_tokens: 200 };
+    // z-ai/glm-4.6 listed $0.43/$1.75: 430 + 350 = 780 micro-dollars, not 180.
+    const priced = priceUsage(usage, { provider: "openrouter", model: "z-ai/glm-4.6", baseUrl: "https://openrouter.ai/api/v1" }, opts);
+    expect(priced).toMatchObject({ provider: "openrouter", micros: 780, basis: "configured" });
   });
 
   it("ignores junk rather than pricing at NaN", () => {
@@ -315,13 +354,15 @@ describe("D3/D5: the ledger records why, and records BYOK as a fact", () => {
     ledger.recordServed({ ...ZERO, input_tokens: 1000, output_tokens: 100 }, anthropicLeg);
     // Again, same leg: another 1500.
     ledger.recordServed({ ...ZERO, input_tokens: 1000, output_tokens: 100 }, anthropicLeg);
-    // Configured flat 0.15: 2000 in + 200 out = 300 + 30 = 330 micro-$.
+    // openai/gpt-oss-120b is LISTED on the OpenRouter card ($0.15/$0.60), and a
+    // listed model keeps its entry over the operator's flat 0.15:
+    // 2000 in + 200 out = 300 + 120 = 420 micro-$.
     ledger.recordServed({ ...ZERO, input_tokens: 2000, output_tokens: 200 }, fallbackLeg);
     ledger.recordByok();
 
     const delta = ledger.take();
     expect(delta.byokCalls).toBe(1);
-    expect(delta.micros).toBe(1500 + 1500 + 330);
+    expect(delta.micros).toBe(1500 + 1500 + 420);
     expect(delta.legs).toEqual([
       {
         provider: "anthropic",
@@ -338,7 +379,7 @@ describe("D3/D5: the ledger records why, and records BYOK as a fact", () => {
         calls: 1,
         inputTokens: 2000,
         outputTokens: 200,
-        micros: 330,
+        micros: 420,
         basis: "configured",
       },
     ]);

@@ -560,12 +560,15 @@ describe("I3 at the real call sites (/analyze, /ask, /dictation/polish, /context
         calls: 1,
         inputTokens: 100,
         outputTokens: 10,
-        // 0.15 USD/1M flat on all 110 tokens = 16.5 → 17 micro-dollars.
-        micros: 17,
+        // openai/gpt-oss-120b is LISTED on the OpenRouter card ($0.15/$0.60 per
+        // 1M, llm/pricing.ts OPENROUTER_LISTINGS) and a listed model keeps its
+        // entry over the operator's flat FALLBACK_RATE_USD_PER_M:
+        // 100 * 0.15 + 10 * 0.60 = 15 + 6 = 21 micro-dollars.
+        micros: 21,
         basis: "configured",
       },
     ]);
-    expect(delta.micros).toBe(17);
+    expect(delta.micros).toBe(21);
   });
 
   it("/dictation/polish + /context/refine BYOK: no fallback leg, ONE request, client's key", async () => {
@@ -676,9 +679,10 @@ describe("I3 at the real call sites (/analyze, /ask, /dictation/polish, /context
       { provider: "openrouter", model: FALLBACK_MODEL, baseUrl: OPENROUTER_BASE_URL, fallback: true },
     ]);
     // The whole point of I5: 1000 in + 100 out on the FALLBACK leg is priced at
-    // OpenRouter's flat 0.15/1M (1100 tokens = 165 micro-$), NOT at the primary's
-    // claude-sonnet-5 card, which would have charged 3*1000 + 15*100 = 4500 —
-    // 27x more, straight into the anti-abuse ceiling.
+    // OpenRouter's listed rate for gpt-oss-120b ($0.15/$0.60 per 1M:
+    // 150 + 60 = 210 micro-$), NOT at the primary's claude-sonnet-5 card, which
+    // would have charged 3*1000 + 15*100 = 4500 — 21x more, straight into the
+    // anti-abuse ceiling.
     expect(spend.peek().legs).toEqual([
       {
         provider: "openrouter",
@@ -686,7 +690,7 @@ describe("I3 at the real call sites (/analyze, /ask, /dictation/polish, /context
         calls: 1,
         inputTokens: 1000,
         outputTokens: 100,
-        micros: 165,
+        micros: 210,
         basis: "configured",
       },
     ]);

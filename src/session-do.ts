@@ -26,7 +26,16 @@ import {
   spendDeltaToWire,
   type SpendLedger,
 } from "./llm/spend.js";
-import { pricingOptionsFromEnv } from "./llm/pricing.js";
+import { billingProviderFor, pricingOptionsFromEnv } from "./llm/pricing.js";
+import {
+  applySessionCost,
+  createSessionCostLedger,
+  isEmptySessionCostDelta,
+  sessionCostRow,
+  type SessionCostLedger,
+  type SessionCostRow,
+  type SessionCostState,
+} from "./session-cost.js";
 import {
   runCombinedAnalysis,
   toPassFailure,
@@ -165,6 +174,10 @@ interface SessionMeta {
   max_duration_ms: number;
   redacted: boolean;
   ended: boolean;
+  /** ms; when `ended` was set (stamped since the per-session cost row
+   * existed — it is the row's `ended_at` and the end of its duration).
+   * Absent on sessions ended before then. */
+  ended_at?: number;
   /** User-defined watch categories, sanitized from `hello`. Optional because
    * metas stored before this feature existed lack the fields. */
   custom_categories?: CustomCategoryDefinition[];
@@ -397,9 +410,9 @@ export function sessionLlmConfig(
       // parameter, so there is no way for this branch to produce a cost; what it
       // records is that the calls HAPPENED, which is what stops a BYOK subject
       // from being indistinguishable from an idle one (defect D5).
-      onUsage: (usage) => {
+      onUsage: (usage, _leg, call) => {
         meters.addUnits(costWeightedUnits(usage));
-        meters.spend.recordByok();
+        meters.spend.recordByok(call);
       },
     };
   }
@@ -410,15 +423,17 @@ export function sessionLlmConfig(
     // FALLBACK_* is configured.
     fallback: fallbackLegFor(env, { usingClientKey: false }),
     onLeg: (leg) => meters.noteLeg(leg),
-    onUsage: (usage, leg) => {
+    onUsage: (usage, leg, call) => {
       meters.addUnits(costWeightedUnits(usage));
       // Real-$ accrual for the per-user meter — this call billed OUR key (the
       // paid hosted path). Priced at the provider AND model that ACTUALLY ran,
       // which on a failed-over call is the fallback's account and rate card,
       // not hosted's (BAR I5). The ledger resolves the account from the leg's
       // base URL, so our OpenAI key and an OpenRouter key are not conflated
-      // just because they share the `openrouter` wire tag (defect D1).
-      meters.spend.recordServed(usage, leg);
+      // just because they share the `openrouter` wire tag (defect D1). `call`
+      // names the pass, for the per-session breakdown the ledger's observer
+      // keeps (session-cost.ts).
+      meters.spend.recordServed(usage, leg, call);
     },
   };
 }
@@ -472,6 +487,13 @@ export class SessionDO implements DurableObject {
 
     if (request.method === "GET" && url.pathname.endsWith("/review")) {
       return this.handleReview();
+    }
+    // What this session has cost so far (or cost in total, once ended), by
+    // model and by pass, with the transcript size to divide it by. Operator-
+    // only at the router (index.ts), like GET /costs; the ownership gate above
+    // applies as well.
+    if (request.method === "GET" && url.pathname.endsWith("/cost")) {
+      return this.handleSessionCost();
     }
     if (request.method === "POST" && url.pathname.endsWith("/redact")) {
       return this.handleRedact();
@@ -1599,6 +1621,7 @@ export class SessionDO implements DurableObject {
   /** Shared by the client's session.end and the max-duration alarm. */
   private async endSessionInternal(meta: SessionMeta): Promise<void> {
     meta.ended = true;
+    meta.ended_at = Date.now();
     await this.ctx.storage.put("meta", meta);
 
     // Emit the accumulated price-test report (if any) here rather than in the
@@ -1609,6 +1632,15 @@ export class SessionDO implements DurableObject {
       await this.emitPriceTestReport(meta);
     } catch (err) {
       console.error("price-test report failed:", err);
+    }
+
+    // The per-session cost line, on the same terms: every end path, before the
+    // purge (the transcript size is read here and is gone after), never
+    // allowed to stop the session from ending.
+    try {
+      await this.emitSessionCostReport(meta);
+    } catch (err) {
+      console.error("session cost report failed:", err);
     }
 
     // "Keep with session" is the only way an attachment outlives the session.
@@ -2231,7 +2263,91 @@ export class SessionDO implements DurableObject {
   private spendLedger: SpendLedger | null = null;
 
   private ledger(): SpendLedger {
-    return (this.spendLedger ??= createSpendLedger(pricingOptionsFromEnv(this.env)));
+    // The session-cost ledger rides along as the spend ledger's observer, so
+    // every block the per-user meter prices — served, BYOK, shadow — reaches
+    // the per-session breakdown from the same PricedUsage, and no call site
+    // has to remember two ledgers (session-cost.ts).
+    return (this.spendLedger ??= createSpendLedger(pricingOptionsFromEnv(this.env), this.sessionCost()));
+  }
+
+  /**
+   * Per-session cost breakdown by (provider, model, pass) — what an operator
+   * reads to compare candidate models on cost per minute. In-memory between
+   * flushes; `flushLlmSpend` folds each drained delta into the persisted
+   * `cost:session` record, so like the other meters it loses at most one
+   * tick's worth to a hibernation and never double-counts.
+   */
+  private sessionCostLedger: SessionCostLedger | null = null;
+
+  private sessionCost(): SessionCostLedger {
+    return (this.sessionCostLedger ??= createSessionCostLedger());
+  }
+
+  private async getSessionCostState(): Promise<SessionCostState | undefined> {
+    return this.ctx.storage.get<SessionCostState>("cost:session");
+  }
+
+  /**
+   * The session's cost row as of `now`: the persisted record plus whatever the
+   * in-memory ledger holds that has not been flushed yet, so a live read is not
+   * one tick behind. Transcript size is counted from stored segments (gone
+   * after an ephemeral purge — which is why the end-of-session report reads it
+   * BEFORE the purge and persists the finished row).
+   */
+  private async buildSessionCostRow(meta: SessionMeta, now: number): Promise<SessionCostRow> {
+    const stored = await this.getSessionCostState();
+    const state = applySessionCost(stored, this.sessionCost().peek());
+    const segments = await this.segmentsSince(0);
+    const hosted = hostedPaidLeg(this.env, Boolean(meta.owner_user_id));
+    return sessionCostRow(state, {
+      sessionId: meta.session_id,
+      ownerUserId: meta.owner_user_id ?? null,
+      createdAt: meta.created_at,
+      endedAt: meta.ended ? (meta.ended_at ?? meta.last_activity_at) : null,
+      now,
+      transcriptSegments: segments.length,
+      transcriptWords: windowWordCount(segments),
+      // The model the hosted leg resolves to for THIS session (HOSTED_PAID_MODEL
+      // when owned, LLM_MODEL otherwise) — read off the meta rather than the
+      // socket runtime so an ended or hibernated session answers the same.
+      configured: { provider: billingProviderFor(hosted), model: hosted.model },
+    });
+  }
+
+  private async handleSessionCost(): Promise<Response> {
+    const meta = await this.getMeta();
+    if (!meta) return new Response("not found", { status: 404 });
+    // An ended session answers from the row it filed at end time, which
+    // already includes the transcript size the purge may since have removed.
+    const filed = meta.ended ? await this.ctx.storage.get<SessionCostRow>("cost:report") : undefined;
+    return Response.json(filed ?? (await this.buildSessionCostRow(meta, Date.now())));
+  }
+
+  /**
+   * At session end: flush what is still in memory, build the finished row,
+   * log it as ONE structured line (`SESSION_COST {...}` — grep it out of
+   * `wrangler tail` / Logpush), keep it under `cost:report` for
+   * `GET /session/:id/cost`, and hand it to the registry so
+   * `GET /costs/sessions` can list recent sessions side by side. Each step is
+   * best-effort and none of them may stop the session from ending.
+   */
+  private async emitSessionCostReport(meta: SessionMeta): Promise<void> {
+    await this.flushLlmSpend();
+    const row = await this.buildSessionCostRow(meta, meta.ended_at ?? Date.now());
+    // Single-line structured JSON so a log pipeline can parse it directly.
+    // Contains no transcript content — sizes, ids, models and money only.
+    console.log(`SESSION_COST ${JSON.stringify(row)}`);
+    await this.ctx.storage.put("cost:report", row);
+    try {
+      const registry = this.env.REGISTRY_DO.get(this.env.REGISTRY_DO.idFromName("registry"));
+      await registry.fetch("https://registry/_session_cost", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(row),
+      });
+    } catch (err) {
+      console.error("session cost report: registry post failed:", err);
+    }
   }
 
   /** Cached anti-abuse verdict from the per-user meter's last /_usage reply.
@@ -2438,7 +2554,22 @@ export class SessionDO implements DurableObject {
     const spendUnits = Math.round(this.unflushedSpendUnits);
     this.unflushedSpendUnits = 0;
     const delta = this.ledger().take();
-    if (spendUnits <= 0 && isEmptyDelta(delta)) return;
+    const costDelta = this.sessionCost().take();
+    if (spendUnits <= 0 && isEmptyDelta(delta) && isEmptySessionCostDelta(costDelta)) return;
+
+    // Per-session breakdown, folded into the persisted record. Same
+    // tolerance as everything else here: a storage failure drops this
+    // delta and never fails the pass that produced it.
+    if (!isEmptySessionCostDelta(costDelta)) {
+      try {
+        await this.ctx.storage.transaction(async (txn) => {
+          const prev = await txn.get<SessionCostState>("cost:session");
+          await txn.put("cost:session", applySessionCost(prev, costDelta));
+        });
+      } catch (err) {
+        console.error("failed to persist session cost", err);
+      }
+    }
 
     if (spendUnits > 0) {
       try {

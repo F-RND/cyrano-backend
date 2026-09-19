@@ -243,7 +243,7 @@ export function resolveAnalysisLlmConfig(
       // failed-over call is billed at the fallback's account and rate, never at
       // the primary's (BAR I5). `leg.baseUrl` is what separates our OpenAI key
       // from an OpenRouter key on the same `openrouter` wire tag.
-      onUsage: (usage, leg) => ledger.recordServed(usage, leg),
+      onUsage: (usage, leg, call) => ledger.recordServed(usage, leg, call),
     };
   }
   return {
@@ -258,7 +258,7 @@ export function resolveAnalysisLlmConfig(
     // there is no code path here that can produce a cost. What it DOES do is
     // count the call, so a bring-your-own-key subject stops looking identical
     // to a subject who never used the product (defect D5).
-    onUsage: () => ledger.recordByok(),
+    onUsage: (_usage, _leg, call) => ledger.recordByok(call),
   };
 }
 
@@ -295,9 +295,9 @@ export function resolveStatelessLlmConfig(
     // different account on a different rate card. (Identical to env.LLM_MODEL
     // on the default path — this is defect D6, fixed at the source rather than
     // by passing a better guess.)
-    onUsage: (usage, leg) => {
-      if (usingClientKey) ledger.recordByok();
-      else ledger.recordServed(usage, leg);
+    onUsage: (usage, leg, call) => {
+      if (usingClientKey) ledger.recordByok(call);
+      else ledger.recordServed(usage, leg, call);
     },
   };
 }

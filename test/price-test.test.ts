@@ -134,6 +134,7 @@ describe("runShadowPass", () => {
             cache_read_input_tokens: 0,
           },
           { provider: config.provider ?? "anthropic", model: config.model, baseUrl: config.baseUrl, fallback: false },
+          { tool: "extract_analysis" },
         );
         clock += 42;
         return { ok: true, sample: { commitments: ["c"] } };
@@ -174,6 +175,7 @@ describe("runShadowPass", () => {
             cache_read_input_tokens: 0,
           },
           { provider: config.provider ?? "anthropic", model: config.model, baseUrl: config.baseUrl, fallback: false },
+          { tool: "extract_analysis" },
         );
         return { ok: true };
       },
@@ -212,6 +214,7 @@ describe("runShadowPass", () => {
             cache_read_input_tokens: 0,
           },
           { provider: "anthropic", model: config.model, baseUrl: config.baseUrl, fallback: false },
+          { tool: "extract_analysis" },
         );
         return { ok: true };
       },

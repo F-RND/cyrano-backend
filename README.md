@@ -136,7 +136,7 @@ A second provider tried exactly once after the primary fails in a retryable way.
 | `FALLBACK_MODEL` | var | — | Required. Model on the fallback provider. |
 | `FALLBACK_BASE_URL` | var | the tag's public root — `openrouter.ai` for `openrouter`, `api.openai.com` for `openai`; none for `anthropic` | `/v1` root. Required for `anthropic`. |
 | `FALLBACK_TIMEOUT_MS` | var | `15000` | Budget for the fallback attempt alone. |
-| `FALLBACK_RATE_USD_PER_M` | var | — | Flat USD per 1M tokens for cost reporting when the provider has no published per-model price. |
+| `FALLBACK_RATE_USD_PER_M` | var | — | Flat USD per 1M tokens for cost reporting when the fallback model is not on the rate table (`GET /costs/rates`). A listed model keeps its listed rate. |
 
 ### Hosted paid tier (optional)
 
@@ -182,6 +182,22 @@ Fans each hosted analysis window out to additional providers on the operator's k
 | `PRICE_TEST_ENABLED` | var | `false` | Literal `true` enables. Never runs on client-key sessions. |
 | `PRICE_TEST_SAMPLE_RATE` | var | `1` | Fraction of windows to shadow, `0`–`1`. |
 | `PRICE_TEST_TARGETS` | var | `[]` | JSON array of `{ label, provider, baseUrl, model, keyEnv, inputPerM, outputPerM }`. |
+
+### Cost per session (always on, operator-only to read)
+
+Every LLM call a session makes on the operator's key is priced (`src/llm/pricing.ts`) and accumulated with the session by provider, model and pass — the forced tool that produced it (`extract_analysis`, `extract_custom_categories`, `generate_whisper`, the pull-mode fallbacks). Nothing is collected from the client for this; a row carries ids, timing, transcript *size* (segments and words, never text) and money. Calls on a client-supplied key count as `byok_calls` at zero dollars.
+
+| Surface | What it gives you |
+| --- | --- |
+| `GET /session/:id/cost` | One session's row, live (measured to now) or final. |
+| `GET /costs/sessions?limit=50&user_id=` | The most recent ended sessions, newest first, plus `totals` and a `by_model` rollup with `usd_per_minute` and `usd_per_1k_words` per model. The registry keeps the last 500 rows. |
+| `GET /costs/rates` | The rate table: every listed provider+model with USD per 1M tokens, its basis (`exact` = the vendor's published list price; `configured` = a maintained number such as OpenRouter's default-route listing) and citation, plus the estimate anything unlisted prices at. |
+| `SESSION_COST {json}` log line | The same row, once per session, at session end (`wrangler tail --format json`, or Logpush). |
+| `LLM_COST_REQUEST {json}` log line | One per LLM-bearing stateless request (`/analyze`, `/ask`, `/context/refine`, `/dictation/polish`, `/health/llm`): route, models, tokens, micro-dollars. No content. |
+
+A model with no listed rate is never priced at $0: it is priced at the defensive Sonnet-class estimate, marked `basis: "estimated"`, and named in the row's `unpriced_models` with its micro-dollars reported under `estimated_micros` rather than `priced_micros`. Add the model to `OPENROUTER_LISTINGS` in `src/llm/pricing.ts` (id exactly as the provider spells it, numbers off the provider's price list, with the fetch date) to make it real.
+
+To measure a candidate model, no code change is needed: point the hosted leg at it (`HOSTED_PAID_PROVIDER`, `HOSTED_PAID_BASE_URL`, `HOSTED_PAID_MODEL`, `HOSTED_PAID_KEY_ENV` for owned sessions; or `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL` for operator sessions), run a session, then read `GET /session/:id/cost` while it is live or `GET /costs/sessions` after it ends. `configured_model` on each row says which model that session was pointed at, and `models` says what actually served it (which differs only on a failover).
 
 ## What stays off until you turn it on
 
