@@ -201,7 +201,7 @@ describe("Connector generalization", () => {
     );
     expect(chatGPTMCPTesting.connectorClient("claude")).toEqual({
       label: "Claude",
-      installUrl: "https://claude.ai/settings/connectors",
+      installUrl: "https://claude.ai/new#customize/connectors",
     });
     expect(chatGPTMCPTesting.connectorClient("Claude")).toEqual(
       chatGPTMCPTesting.connectorClient("claude"),
