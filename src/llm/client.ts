@@ -128,6 +128,23 @@ export interface FallbackLeg {
   timeoutMs?: number;
 }
 
+/**
+ * Which CALL a usage block belongs to — the pass, named by the forced tool
+ * (`extract_analysis`, `generate_whisper`, `refine_day_context`, …). The
+ * per-session cost ledger (session-cost.ts) keys its breakdown on this, so an
+ * operator can see that a session's dollars went to analysis ticks rather than
+ * whisper rewrites. The tool name is the natural key: every LLM call in this
+ * backend goes through `callTool` with exactly one tool, and the name is a
+ * stable identifier that carries no transcript content.
+ */
+export interface LlmCallInfo {
+  tool: string;
+}
+
+/** The pass name reported for the Settings "Test connection" probe, which
+ * calls no tool. */
+export const PING_TOOL_NAME = "ping";
+
 export interface LlmConfig {
   baseUrl: string;
   apiKey: string;
@@ -139,8 +156,10 @@ export interface LlmConfig {
    * or refusal) — the Session DO accumulates this into its per-session budget.
    * `leg` names the provider+model that produced THIS block, which is what the
    * real-$ meter must price against: on a failed-over call the primary and the
-   * fallback can each report usage, at different rates. */
-  onUsage?: (usage: LlmUsage, leg: ServedLeg) => void;
+   * fallback can each report usage, at different rates. `call` names the pass
+   * (the forced tool) so per-session cost can be broken down by what the
+   * dollars bought; a callback that ignores it is unaffected. */
+  onUsage?: (usage: LlmUsage, leg: ServedLeg, call: LlmCallInfo) => void;
   /** Called once with the leg that produced the returned result. Distinct from
    * `onUsage` because a leg can serve a call and report no usage block at all
    * (some OpenAI-compat responses omit `usage`) — without this, a fallback that
@@ -416,7 +435,12 @@ interface MessagesResponse {
   usage?: Partial<LlmUsage>;
 }
 
-function reportUsage(config: LlmConfig, usage: Partial<LlmUsage> | undefined, leg: ServedLeg): void {
+function reportUsage(
+  config: LlmConfig,
+  usage: Partial<LlmUsage> | undefined,
+  leg: ServedLeg,
+  call: LlmCallInfo,
+): void {
   if (!config.onUsage || !usage) return;
   config.onUsage(
     {
@@ -426,6 +450,7 @@ function reportUsage(config: LlmConfig, usage: Partial<LlmUsage> | undefined, le
       cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
     },
     leg,
+    call,
   );
 }
 
@@ -517,7 +542,7 @@ async function callToolAnthropic<TOutput>(
   }
 
   const json = (await res.json()) as MessagesResponse;
-  reportUsage(config, json.usage, leg);
+  reportUsage(config, json.usage, leg, { tool: tool.name });
 
   if (json.stop_reason === "refusal") {
     throw new LlmCallError("LLM declined the request (stop_reason: refusal)");
@@ -763,6 +788,7 @@ async function callToolOpenAICompat<TOutput>(
       cache_creation_input_tokens: cacheWrite,
     },
     leg,
+    { tool: tool.name },
   );
 
   const choice = json.choices?.[0];
@@ -867,6 +893,7 @@ async function reportPingUsage(config: LlmConfig, res: Response, openAiCompat: b
           }
         : u,
       legOf(config, false),
+      { tool: PING_TOOL_NAME },
     );
   } catch {
     // Unparseable probe body: nothing to attribute, and never a probe failure.

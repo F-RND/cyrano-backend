@@ -121,14 +121,107 @@ export const ESTIMATE_RATE: TokenRate = { inputPerM: 3, outputPerM: 15, ...ANTHR
 
 
 /**
+ * One OpenRouter model's listed price, USD per 1,000,000 tokens, copied from
+ * OpenRouter's public models API (`GET https://openrouter.ai/api/v1/models`,
+ * whose `pricing.prompt` / `pricing.completion` / `pricing.input_cache_read` /
+ * `pricing.input_cache_write` are USD per TOKEN — multiply by 1e6). Cache
+ * fields are optional: a model that lists no cached-input price bills cache
+ * reads as ordinary input (1x), and one that lists no cache-write price bills
+ * writes as ordinary input (1x). Both defaults are the over-counting direction.
+ */
+interface OpenRouterListing {
+  inputPerM: number;
+  outputPerM: number;
+  cacheReadPerM?: number;
+  cacheWritePerM?: number;
+}
+
+/** When {@link OPENROUTER_LISTINGS} was last copied from the models API. Every
+ * OpenRouter entry cites this date; re-fetch and bump it together. */
+export const OPENROUTER_LISTINGS_FETCHED = "2026-09-18";
+
+/**
+ * The OpenRouter models we run or are evaluating on our own key, with the
+ * price OpenRouter listed for each on {@link OPENROUTER_LISTINGS_FETCHED}.
+ *
+ * DATA, NOT POLICY. Add a candidate here (id exactly as OpenRouter spells it,
+ * numbers straight off the API) and every meter, report and log line prices
+ * it. Leave a model out and it prices `estimated` (or at the operator's
+ * FALLBACK_RATE_USD_PER_M) and every report says so — never $0, never a
+ * silent Sonnet guess.
+ *
+ * WHY THESE PRICE `configured`, NOT `exact`. OpenRouter is a router: each
+ * model id fans out to one of several upstream providers, and the invoice is
+ * at the rate of the route actually taken. The models API publishes one price
+ * per model — the default route's — and that is what is copied here. It is
+ * usually the bill; it is not guaranteed to be, so it carries the basis that
+ * means "the best number we have, do not read it as a bill" (see ListedRate).
+ *
+ * Pro+ candidates (2026-09-18): the Z.ai GLM family and the ~27–35B Qwen3
+ * family, per the budget-model evaluation. The incumbents are listed too so a
+ * shadow/eval run through OpenRouter prices the same as through the vendor.
+ */
+const OPENROUTER_LISTINGS: Record<string, OpenRouterListing> = {
+  // --- Z.ai GLM ---
+  "z-ai/glm-4.5": { inputPerM: 0.6, outputPerM: 2.2, cacheReadPerM: 0.11 },
+  "z-ai/glm-4.5-air": { inputPerM: 0.13, outputPerM: 0.85, cacheReadPerM: 0.025 },
+  "z-ai/glm-4.6": { inputPerM: 0.43, outputPerM: 1.75, cacheReadPerM: 0.08 },
+  "z-ai/glm-4.7": { inputPerM: 0.4, outputPerM: 1.75, cacheReadPerM: 0.08 },
+  "z-ai/glm-4.7-flash": { inputPerM: 0.0605, outputPerM: 0.4 },
+  "z-ai/glm-5.3-flash": { inputPerM: 0.09, outputPerM: 0.3, cacheReadPerM: 0.018 },
+  // --- Qwen3 ~27–35B ---
+  "qwen/qwen3-32b": { inputPerM: 0.08, outputPerM: 0.28 },
+  "qwen/qwen3-30b-a3b": { inputPerM: 0.12, outputPerM: 0.5 },
+  "qwen/qwen3-30b-a3b-instruct-2507": { inputPerM: 0.0481, outputPerM: 0.193 },
+  "qwen/qwen3.5-27b": { inputPerM: 0.195, outputPerM: 1.56 },
+  "qwen/qwen3.5-35b-a3b": { inputPerM: 0.1625, outputPerM: 1.3 },
+  "qwen/qwen3.6-27b": { inputPerM: 0.3, outputPerM: 2.0, cacheReadPerM: 0.03 },
+  "qwen/qwen3.6-35b-a3b": { inputPerM: 0.1, outputPerM: 0.9, cacheReadPerM: 0.05 },
+  "qwen/qwen3.8-27b": { inputPerM: 0.214, outputPerM: 2.55, cacheReadPerM: 0.15 },
+  // --- other models this backend already names (fallback leg, eval harness) ---
+  "openai/gpt-oss-120b": { inputPerM: 0.15, outputPerM: 0.6, cacheReadPerM: 0.075 },
+  "openai/gpt-oss-20b": { inputPerM: 0.03, outputPerM: 0.13, cacheReadPerM: 0.03 },
+  // --- the incumbents, via OpenRouter (same list price as the vendor) ---
+  "anthropic/claude-haiku-4.5": { inputPerM: 1, outputPerM: 5, cacheReadPerM: 0.1, cacheWritePerM: 1.25 },
+  "openai/gpt-5.6-luna": { inputPerM: 0.2, outputPerM: 1.2, cacheReadPerM: 0.02, cacheWritePerM: 0.25 },
+};
+
+/** Multiplier of the input rate for a listed cache price; 1x when unlisted. */
+function cacheMultiplier(perM: number | undefined, inputPerM: number): number {
+  if (perM === undefined || !(inputPerM > 0)) return 1;
+  return perM / inputPerM;
+}
+
+function openRouterCard(): RateCard {
+  const models: Record<string, ListedRate> = {};
+  for (const [model, l] of Object.entries(OPENROUTER_LISTINGS)) {
+    models[model] = {
+      rate: {
+        inputPerM: l.inputPerM,
+        outputPerM: l.outputPerM,
+        cacheWriteMultiplier: cacheMultiplier(l.cacheWritePerM, l.inputPerM),
+        cacheReadMultiplier: cacheMultiplier(l.cacheReadPerM, l.inputPerM),
+      },
+      basis: "configured",
+      source:
+        `OpenRouter models API listing $${l.inputPerM}/$${l.outputPerM} per 1M ` +
+        `(openrouter.ai/api/v1/models, fetched ${OPENROUTER_LISTINGS_FETCHED}); ` +
+        "default-route price — OpenRouter bills at the upstream route actually taken",
+    };
+  }
+  return { kind: "published", models };
+}
+
+/**
  * The rate cards, keyed by BILLING PROVIDER (never by model name alone — D1).
  *
  * Anthropic and OpenAI publish per-model list prices, so they get `published`
- * cards and their listed models price `exact`. OpenRouter is
- * `unpriced` — a per-model card for the ~300 models it proxies is not
- * maintainable, and the only way an OpenRouter leg reaches OUR meter is if an
- * operator configures it as the hosted or fallback leg, in which case they can
- * supply a flat rate (see {@link pricingOptionsFromEnv}).
+ * cards and their listed models price `exact`. OpenRouter gets a `published`
+ * card too, but a deliberately SHORT one ({@link OPENROUTER_LISTINGS}: the
+ * models we run or evaluate on our key), and its entries price `configured`
+ * because OpenRouter's listed price is the default route's, not a guarantee.
+ * Any other OpenRouter model prices at the operator's flat rate if one is set
+ * (see {@link pricingOptionsFromEnv}), else `estimated`.
  */
 const RATE_CARDS: Record<BillingProvider, RateCard> = {
   anthropic: {
@@ -166,31 +259,37 @@ const RATE_CARDS: Record<BillingProvider, RateCard> = {
   openai: {
     kind: "published",
     models: {
-      // GPT-5.6 Luna — an example hosted paid model (HOSTED_PAID_MODEL),
-      // reached over the OpenAI-compat wire at api.openai.com.
+      // GPT-5.6 Luna — the hosted paid model (HOSTED_PAID_MODEL) as of the
+      // 2026-07-16 switch, reached over the OpenAI-compat wire at api.openai.com.
       //
-      // `configured`, NOT `exact`, and that is the whole point of ListedRate.
-      // The DOLLARS are carried forward unchanged from the old MODEL_RATES so
-      // this work does not move the live hosted meter by a micro-dollar — but
-      // the cacheRead multiplier (0.1x) is Anthropic's ratio, not OpenAI's, and
-      // OpenAI's own cached-input discount is shallower, so a cache-heavy hosted
-      // call can UNDER-count here. A rate we cannot cite must not carry the
-      // basis that means "this is a bill": it is an operator-maintained number,
-      // which is exactly what `configured` means. Promote it to `exact` only
-      // together with a cited source and a verified cache multiplier.
+      // 2026-09-18: promoted from `configured` $1/$6 to `exact` $0.20/$1.20.
+      // The old figure was carried forward from the pre-2026-08-19 MODEL_RATES
+      // table and never verified; OpenAI's own price list
+      // (https://developers.openai.com/api/docs/pricing, read 2026-09-18) lists
+      // Luna at $0.20 input / $0.02 cached input / $1.20 output per 1M for the
+      // standard tier, so the meter was OVER-counting Luna 5x. That matters now
+      // because Luna is the incumbent every budget candidate is compared
+      // against for cost-per-session — a 5x-inflated baseline would make every
+      // candidate look five times better than it is. Cache read 0.1x is
+      // OpenAI's own ratio here ($0.02 / $0.20); cache writes on the short
+      // context (<= 272K) bill as ordinary input, hence 1x.
       "gpt-5.6-luna": {
-        rate: { inputPerM: 1, outputPerM: 6, cacheWriteMultiplier: 1, cacheReadMultiplier: 0.1 },
-        basis: "configured",
+        rate: { inputPerM: 0.2, outputPerM: 1.2, cacheWriteMultiplier: 1, cacheReadMultiplier: 0.1 },
+        basis: "exact",
         source:
-          "carried forward from the pre-2026-08-19 MODEL_RATES table; input/output never verified against OpenAI's price list and cacheRead 0.1x is Anthropic's ratio, not OpenAI's",
+          "OpenAI published list price $0.20/$1.20 per 1M, cached input $0.02 (developers.openai.com/api/docs/pricing, verified 2026-09-18)",
       },
     },
   },
 
-  openrouter: {
-    kind: "unpriced",
-    note: "per-model prices vary across ~300 proxied models; set FALLBACK_RATE_USD_PER_M to price an OpenRouter leg",
-  },
+  // OpenRouter used to be `unpriced` — "a per-model card for the ~300 models
+  // it proxies is not maintainable". It still is not, and this card does not
+  // try: it lists ONLY the models we run or are evaluating on our own key (see
+  // OPENROUTER_LISTINGS), so that a cost-per-session comparison between
+  // candidates is real dollars rather than every candidate collapsing onto
+  // the Sonnet estimate. Anything else on OpenRouter still prices off
+  // FALLBACK_RATE_USD_PER_M if set, else `estimated`, exactly as before.
+  openrouter: openRouterCard(),
   unknown: {
     kind: "unpriced",
     note: "base URL not recognised as an account we hold",
@@ -432,4 +531,59 @@ export function pricingOptionsFromEnv(
     }
   }
   return { configuredFlatPerM };
+}
+
+/** One row of {@link priceTable}: a listed provider+model and what it costs. */
+export interface PriceTableEntry {
+  provider: BillingProvider;
+  model: string;
+  input_per_m: number;
+  output_per_m: number;
+  cache_write_multiplier: number;
+  cache_read_multiplier: number;
+  basis: "exact" | "configured";
+  source: string;
+}
+
+/**
+ * The whole rate table, as data — every listed provider+model with its rate,
+ * basis and citation, plus the estimate every UNLISTED model prices at and the
+ * providers for which no card exists. Served at the operator's GET /costs/rates
+ * so "is model X priced, and at what?" is one request rather than a read of
+ * this file, and pinned by tests so a listing without a source cannot ship.
+ * Sorted by provider then model, so two calls return byte-identical bodies.
+ */
+export function priceTable(): {
+  models: PriceTableEntry[];
+  /** What any model NOT in `models` prices at, marked `estimated`. */
+  estimate_rate: { input_per_m: number; output_per_m: number; basis: "estimated" };
+  unpriced_providers: Array<{ provider: BillingProvider; note: string }>;
+} {
+  const models: PriceTableEntry[] = [];
+  const unpriced: Array<{ provider: BillingProvider; note: string }> = [];
+  for (const provider of Object.keys(RATE_CARDS) as BillingProvider[]) {
+    const card = RATE_CARDS[provider];
+    if (card.kind === "unpriced") {
+      unpriced.push({ provider, note: card.note });
+      continue;
+    }
+    for (const [model, listed] of Object.entries(card.models)) {
+      models.push({
+        provider,
+        model,
+        input_per_m: listed.rate.inputPerM,
+        output_per_m: listed.rate.outputPerM,
+        cache_write_multiplier: listed.rate.cacheWriteMultiplier,
+        cache_read_multiplier: listed.rate.cacheReadMultiplier,
+        basis: listed.basis,
+        source: listed.source,
+      });
+    }
+  }
+  models.sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
+  return {
+    models,
+    estimate_rate: { input_per_m: ESTIMATE_RATE.inputPerM, output_per_m: ESTIMATE_RATE.outputPerM, basis: "estimated" },
+    unpriced_providers: unpriced,
+  };
 }
