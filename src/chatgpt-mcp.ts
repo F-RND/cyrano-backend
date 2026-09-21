@@ -763,6 +763,10 @@ const GET_CONTEXT_TOOL = {
     properties: {
       active: { type: "boolean" },
       context: { type: ["object", "null"] },
+      writable: {
+        type: "boolean",
+        description: "Whether cyrano_add_session_note and cyrano_send_reply would land right now. False when nothing is relaying or when the session has ended: an ended session stays readable for its retention window, but nothing more can be written into it. Don't offer to save a note when this is false.",
+      },
       // Present only when `active` is false. An empty read has several very
       // different causes and identical shape without these.
       reason: {
@@ -776,7 +780,7 @@ const GET_CONTEXT_TOOL = {
         description: "Which Cyrano account and pairing this connector resolved to. Compare it with the account the user's sessions run under when they insist sessions exist.",
       },
     },
-    required: ["active", "context"],
+    required: ["active", "context", "writable"],
     additionalProperties: false,
   },
   annotations: {
@@ -789,7 +793,7 @@ const GET_CONTEXT_TOOL = {
 const ADD_NOTE_TOOL = {
   name: "cyrano_add_session_note",
   title: "Add a note to the live Cyrano session",
-  description: "File a note, reminder, decision, commitment, or follow-up into the conversation Cyrano is relaying right now. Use it whenever the user asks you to note, remember, capture, or remind them of something during a session — it lands in the session's Notes beside the ones they typed, tagged with your name, and is never spoken aloud. Notes attach to the live session automatically; there is no session id to supply.",
+  description: "File a note, reminder, decision, commitment, or follow-up into the conversation Cyrano is relaying right now. Use it whenever the user asks you to note, remember, capture, or remind them of something during a session — it lands in the session's Notes beside the ones they typed, tagged with your name, and is never spoken aloud. Notes attach to the live session automatically; there is no session id to supply. They can only be filed while the session is running: once it has ended the call is refused (cyrano_get_live_context reports `writable: false`), and the user would need to start a new session — tell them the note was not saved rather than retrying.",
   inputSchema: {
     type: "object",
     properties: {
@@ -840,7 +844,7 @@ const ADD_NOTE_TOOL = {
 const SEND_REPLY_TOOL = {
   name: "cyrano_send_reply",
   title: "Reply to a Cyrano question",
-  description: "Use this only when the user explicitly asks you to answer a pending direct question from cyrano_get_live_context. The short reply is delivered back through Cyrano and may be spoken in the user's ear.",
+  description: "Use this only when the user explicitly asks you to answer a pending direct question from cyrano_get_live_context. The short reply is delivered back through Cyrano and may be spoken in the user's ear. Replies can only be sent while the session is running (cyrano_get_live_context reports `writable`).",
   inputSchema: {
     type: "object",
     properties: {
@@ -1190,6 +1194,7 @@ async function getLiveContext(
   const inactive = (reason: InactiveReason): JsonObject => ({
     active: false,
     context: null,
+    writable: false,
     reason,
     detail: inactiveDetail(reason),
     account: accountEcho(identity, connectionLabel),
@@ -1208,7 +1213,10 @@ async function getLiveContext(
   if (response.status === 404) return inactive("session_expired");
   if (!response.ok) throw new Error(`context_failed_${response.status}`);
   const context = await response.json<JsonObject>();
-  return { active: true, context };
+  // An ended session is still readable for its retention window, so `active`
+  // alone doesn't say whether cyrano_add_session_note would land. Say so here,
+  // before the assistant offers a save it can't perform.
+  return { active: true, context, writable: context.ended !== true };
 }
 
 async function postAgentResults(
@@ -1229,8 +1237,34 @@ async function postAgentResults(
     body: JSON.stringify(body),
   });
   const response = await stub.fetch(forwardWithIdentity(request, identity));
-  if (!response.ok) throw new Error(`results_failed_${response.status}`);
+  if (!response.ok) {
+    throw new Error(agentResultsFailure(response.status, await response.text().catch(() => "")));
+  }
   return response.json<JsonObject>();
+}
+
+/**
+ * The assistant-facing text for a refused write. The session DO answers with
+ * a JSON body naming the reason, and until this existed the Worker threw the
+ * body away and surfaced only `results_failed_409` — which an assistant reads
+ * as a transient conflict and retries, when the real answer was "the session
+ * has ended; start a new one". Named reasons get a sentence with the next
+ * step; anything else keeps the status and whatever the body said.
+ */
+export function agentResultsFailure(status: number, body: string): string {
+  let reason: string | null = null;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (parsed && typeof parsed === "object" && isString((parsed as JsonObject).error)) {
+      reason = (parsed as JsonObject).error as string;
+    }
+  } catch {
+    reason = body.trim() || null;
+  }
+  if (status === 409 && reason === "session_ended") {
+    return "session_ended. The relayed Cyrano session has ended, and notes and replies can only be filed while a session is running (the transcript stays readable for its retention window, but nothing more can be written into it). This is not a transient conflict — do not retry. Tell the user the note or reply was NOT saved; they can start a new session if they still want it filed.";
+  }
+  return reason ? `results_failed_${status}: ${reason}` : `results_failed_${status}`;
 }
 
 /**
@@ -1543,6 +1577,7 @@ export const chatGPTMCPTesting = {
   sessionOriginQuery,
   inactiveReason,
   inactiveDetail,
+  agentResultsFailure,
   citedSeqs,
   focusRelevantState,
   connectorClients: CONNECTOR_CLIENTS,
