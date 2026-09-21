@@ -309,6 +309,53 @@ describe("Empty reads explain themselves", () => {
   });
 });
 
+describe("Refused writes explain themselves", () => {
+  const { agentResultsFailure, addNoteTool, getContextTool, tools } = chatGPTMCPTesting;
+
+  it("turns the DO's session_ended 409 into a sentence with the next step", () => {
+    // The reported failure: an assistant saw only `results_failed_409`, read it
+    // as a transient conflict, retried twice, and had nothing to tell the user.
+    // The DO had said why in the body the Worker threw away.
+    const text = agentResultsFailure(409, JSON.stringify({ error: "session_ended" }));
+    expect(text).toMatch(/^session_ended\./);
+    expect(text).toMatch(/has ended/i);
+    expect(text).toMatch(/do not retry/i);
+    expect(text).toMatch(/NOT saved/);
+    expect(text).toMatch(/new session/i);
+    expect(text).not.toContain("results_failed");
+  });
+
+  it("keeps the status and the body for every other refusal", () => {
+    expect(agentResultsFailure(400, JSON.stringify({ error: "invalid_json" }))).toBe(
+      "results_failed_400: invalid_json",
+    );
+    expect(agentResultsFailure(403, "forbidden")).toBe("results_failed_403: forbidden");
+    expect(agentResultsFailure(500, "")).toBe("results_failed_500");
+    // A 409 that isn't session_ended must stay distinguishable from one that is.
+    expect(agentResultsFailure(409, JSON.stringify({ error: "something_else" }))).toBe(
+      "results_failed_409: something_else",
+    );
+  });
+
+  it("declares `writable` in the strict context schema and requires it", () => {
+    // An ended session is still readable for its retention window, so
+    // `active: true` alone doesn't say whether a note would land.
+    const schema = getContextTool.outputSchema;
+    expect(schema.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties)).toContain("writable");
+    expect(schema.required).toContain("writable");
+    expect(schema.properties.writable.description).toMatch(/ended/i);
+  });
+
+  it("tells the assistant about the write window before it calls", () => {
+    expect(addNoteTool.description).toMatch(/while the session is running/i);
+    expect(addNoteTool.description).toMatch(/writable/);
+    expect(addNoteTool.description).toMatch(/not saved/i);
+    const reply = tools.find((t) => t.name === "cyrano_send_reply");
+    expect(reply?.description).toMatch(/while the session is running/i);
+  });
+});
+
 describe("cyrano_get_session origin read", () => {
   it("asks the device for the whole transcript, not its live-poll tail", () => {
     // The device's /context defaults to the most recent 80 lines. The tool
