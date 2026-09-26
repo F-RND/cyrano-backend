@@ -6,6 +6,7 @@ import commitmentsTool from "../../schemas/commitments.json";
 import asksTool from "../../schemas/asks.json";
 import subtextTool from "../../schemas/subtext.json";
 import suggestionsTool from "../../schemas/suggestions.json";
+import lecturePrompts from "./lecture-prompts.json";
 import { callTool, LlmCallError, type LlmConfig, type ToolSchema } from "../llm/client.js";
 import { validAsks, validCommitments, validDecisions, validSubtext, validSuggestions } from "./validate.js";
 import type {
@@ -13,6 +14,7 @@ import type {
   CommitmentExtraction,
   DecisionExtraction,
   NextMoveSuggestion,
+  SessionOccasionWire,
   Speaker,
   SubtextObservation,
   TranscriptSegment,
@@ -212,6 +214,34 @@ const COMBINED_CATEGORIES: (keyof AnalysisResult)[] = [
   "decisions",
 ];
 
+/** The combined tool for a lecture: schemas/analysis.json with only the system
+ * prompt swapped for the role's (lecture-prompts.json, the verbatim text of
+ * the app's on-device lecture prompts). Same name, so its spend lands in the
+ * same `extract_analysis` bucket; same input/output schemas, so all five
+ * categories stay required and validation is unchanged. Built once, at load. */
+const LECTURE_LISTENING_TOOL: ToolSchema = {
+  ...(analysisTool as ToolSchema),
+  system_prompt: lecturePrompts.listening,
+};
+const LECTURE_TEACHING_TOOL: ToolSchema = {
+  ...(analysisTool as ToolSchema),
+  system_prompt: lecturePrompts.teaching,
+};
+
+/** The tool the combined pass sends for an occasion. A conversation — and
+ * anything unrecognised — gets the imported analysis.json object itself, not
+ * a copy, so its request is exactly what it was before occasions existed. */
+export function combinedAnalysisTool(occasion: SessionOccasionWire): ToolSchema {
+  switch (occasion) {
+    case "lecture.listening":
+      return LECTURE_LISTENING_TOOL;
+    case "lecture.teaching":
+      return LECTURE_TEACHING_TOOL;
+    default:
+      return analysisTool as ToolSchema;
+  }
+}
+
 /**
  * Runs the four built-in extractions as ONE batched call (schemas/analysis.json)
  * — same window, same context, one bill instead of four. This replaced the
@@ -221,6 +251,11 @@ const COMBINED_CATEGORIES: (keyof AnalysisResult)[] = [
  *
  * A failure degrades to empty results rather than throwing, but is returned
  * (not just logged) so the caller can broadcast a machine-readable status.
+ *
+ * `occasion` picks the system prompt (see combinedAnalysisTool). It is the
+ * trailing parameter, and optional, so every existing caller — including the
+ * private eval harness, typechecked against this file — keeps compiling and
+ * keeps getting the conversation pass.
  */
 export async function runCombinedAnalysis(
   config: LlmConfig,
@@ -228,7 +263,12 @@ export async function runCombinedAnalysis(
   knownCommitments: string[],
   knownOpenAsks: string[],
   userContext: UserContextItem[] = [],
+  occasion: SessionOccasionWire = "conversation",
 ): Promise<CombinedAnalysisOutcome> {
+  // Callers sanitize, but the type is only a promise: an unknown value must
+  // run the conversation pass, never a lecture's empty subtext.
+  const tool = combinedAnalysisTool(occasion);
+  const lecture = occasion === "lecture.listening" || occasion === "lecture.teaching";
   try {
     const result = await callTool<{
       commitments: unknown;
@@ -238,7 +278,7 @@ export async function runCombinedAnalysis(
       decisions: unknown;
     }>(
       config,
-      analysisTool as ToolSchema,
+      tool,
       withUserContext(
         {
           now: new Date().toISOString(),
@@ -251,8 +291,12 @@ export async function runCombinedAnalysis(
       { maxTokens: COMBINED_MAX_OUTPUT_TOKENS },
     );
     const { speakerBySeq, slotBySeq } = attributionMaps(window);
+    // A lecture's subtext is [] by construction (below), so a reply that left
+    // it out has not left anything incomplete.
     const missing = COMBINED_CATEGORIES.filter(
-      (category) => !Array.isArray((result as Record<string, unknown>)[category]),
+      (category) =>
+        !(lecture && category === "subtext") &&
+        !Array.isArray((result as Record<string, unknown>)[category]),
     );
     if (missing.length > 0) {
       console.error(
@@ -268,7 +312,10 @@ export async function runCombinedAnalysis(
           config.logContent === true,
         ),
         asks: validAsks(result.asks, speakerBySeq, slotBySeq),
-        subtext: validSubtext(result.subtext),
+        // Subtext's labels are built for a negotiation; nothing in a lecture
+        // maps to them. The lecture prompts already ask for an empty array —
+        // this holds it when a model ignores that.
+        subtext: lecture ? [] : validSubtext(result.subtext),
         suggestions: validSuggestions(result.suggestions).slice(0, 2),
         decisions: validDecisions(result.decisions, speakerBySeq, slotBySeq).slice(0, MAX_DECISIONS),
       },

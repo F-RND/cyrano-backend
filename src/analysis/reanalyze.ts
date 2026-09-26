@@ -23,7 +23,7 @@ import {
   type PassFailure,
 } from "./passes.js";
 import type { LlmConfig } from "../llm/client.js";
-import type { Speaker, TranscriptSegment } from "../types.js";
+import type { SessionOccasionWire, Speaker, TranscriptSegment } from "../types.js";
 
 export interface ReanalyzeLine {
   seq: number;
@@ -108,10 +108,13 @@ export interface ReanalyzeOutcome {
 /** Window the transcript through the combined pass, carrying extracted
  * commitments/asks forward as known_* and deduping across windows by text.
  * Stops at the first failed window (an auth/budget error would fail every
- * subsequent window identically) and reports it alongside any partial. */
+ * subsequent window identically) and reports it alongside any partial.
+ * `occasion` runs every window as that occasion's pass — reanalysis is how a
+ * session recorded as a conversation is re-read as the lecture it was. */
 export async function reanalyzeTranscript(
   config: LlmConfig,
   lines: ReanalyzeLine[],
+  occasion: SessionOccasionWire = "conversation",
 ): Promise<ReanalyzeOutcome> {
   const result: AnalysisResult = { commitments: [], asks: [], subtext: [], suggestions: [], decisions: [] };
   const seenTexts = {
@@ -144,6 +147,8 @@ export async function reanalyzeTranscript(
       window,
       result.commitments.slice(-KNOWN_CARRY).map((c) => c.text),
       result.asks.slice(-KNOWN_CARRY).map((a) => a.text),
+      [],
+      occasion,
     );
     if (outcome.failure) {
       return {
