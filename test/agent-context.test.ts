@@ -14,7 +14,7 @@ import {
 } from "../src/agent-context.js";
 import { agentSourceLabel, sanitizeAgentNote } from "../src/session-do.js";
 import { chatGPTMCPTesting } from "../src/chatgpt-mcp.js";
-import type { AskExtraction, TranscriptSegment } from "../src/types.js";
+import { AGENT_NOTE_KINDS, type AskExtraction, type TranscriptSegment } from "../src/types.js";
 
 function segment(seq: number, text: string, over: Partial<TranscriptSegment> = {}): TranscriptSegment {
   return {
@@ -213,6 +213,13 @@ describe("agent-filed notes", () => {
   it("refuses an empty note and falls back to a plain kind", () => {
     expect(sanitizeAgentNote({ text: "   " }, "Claude", 1)).toBeNull();
     expect(sanitizeAgentNote({ text: "note", kind: "nonsense" as never }, "Claude", 1)!.kind).toBe("note");
+  });
+
+  it("keeps a study_cue — the lecture kind — rather than flattening it to a note", () => {
+    expect(AGENT_NOTE_KINDS).toContain("study_cue");
+    const note = sanitizeAgentNote({ text: "Know the Okafor proof for the final", kind: "study_cue" }, "Claude", 42);
+    expect(note!.kind).toBe("study_cue");
+    expect(note!.anchor_seq).toBe(42);
   });
 
   it("takes the filing client's name from the connection, sanitized", () => {

@@ -65,6 +65,7 @@ import {
   MAX_ATTACHMENTS_PER_SESSION,
   MAX_HOT_STATE_ITEMS,
   MAX_USER_CONTEXT_PER_TICK,
+  sanitizeOccasion,
 } from "./types.js";
 import {
   parseAgentContextQuery,
@@ -85,6 +86,7 @@ import type {
   ClientAgentMessage,
   ClientHelloMessage,
   ClientMessage,
+  ClientSessionOccasionMessage,
   ClientSessionRetentionMessage,
   ClientWhisperFeedbackMessage,
   ClientWhisperRequestMessage,
@@ -97,6 +99,7 @@ import type {
   PullAskType,
   RetentionPolicy,
   ServerMessage,
+  SessionOccasionWire,
   StoredAttachment,
   SubtextObservation,
   TranscriptSegment,
@@ -182,6 +185,11 @@ interface SessionMeta {
    * metas stored before this feature existed lack the fields. */
   custom_categories?: CustomCategoryDefinition[];
   detect_categories?: boolean;
+  /** What this session is — sanitized from `hello`, changed by
+   * `session.occasion` — and so which prompt the combined pass runs.
+   * Optional because metas stored before lectures existed lack it; absent
+   * reads as "conversation". */
+  occasion?: SessionOccasionWire;
   /** The tenant that created this session (added 2026-07-13), when it was
    * created under a per-user token rather than the operator's own
    * AUTH_TOKEN. Undefined for every self-host / operator-created session —
@@ -339,6 +347,22 @@ export function retentionAfterFrame(
   if (frame.session_id !== meta.session_id) return null;
   const narrowed = narrowestRetention(meta.retention, frame.retention);
   return narrowed === meta.retention ? null : narrowed;
+}
+
+/** The same decision for a `session.occasion` frame: the occasion to store,
+ * or null when there is nothing to write. Routed like `session.retention` — a
+ * frame naming a different session is ignored rather than applied to a
+ * session it wasn't aimed at — but not one-way: the occasion is not a privacy
+ * control, so a switch back to "conversation" is as valid as one away from
+ * it. Sanitized like the hello field, so an unknown value reads as
+ * "conversation". */
+export function occasionAfterFrame(
+  meta: { session_id: string; occasion?: SessionOccasionWire },
+  frame: { session_id: string; occasion: unknown },
+): SessionOccasionWire | null {
+  if (frame.session_id !== meta.session_id) return null;
+  const occasion = sanitizeOccasion(frame.occasion);
+  return occasion === (meta.occasion ?? "conversation") ? null : occasion;
 }
 
 /** Collapses this tick's pass failures into the wire status. Auth failures
@@ -633,6 +657,12 @@ export class SessionDO implements DurableObject {
       case "agent.message":
         await this.handleAgentMessage(message);
         return;
+      case "session.occasion":
+        await this.handleSessionOccasion(message);
+        return;
+      // No default: a frame type this server doesn't know is dropped
+      // silently, which is what lets a newer client send one to an older
+      // deployment.
     }
   }
 
@@ -669,6 +699,20 @@ export class SessionDO implements DurableObject {
     const narrowed = retentionAfterFrame(meta, message);
     if (narrowed === null) return;
     meta.retention = narrowed;
+    await this.ctx.storage.put("meta", meta);
+  }
+
+  /**
+   * Mid-session occasion switch — the user corrected the picker, or took the
+   * app's suggestion that they are the one teaching. Read by the next tick;
+   * nothing already analyzed is redone. See `occasionAfterFrame`.
+   */
+  private async handleSessionOccasion(message: ClientSessionOccasionMessage): Promise<void> {
+    const meta = await this.getMeta();
+    if (!meta) return;
+    const occasion = occasionAfterFrame(meta, message);
+    if (occasion === null) return;
+    meta.occasion = occasion;
     await this.ctx.storage.put("meta", meta);
   }
 
@@ -735,6 +779,7 @@ export class SessionDO implements DurableObject {
         ended: false,
         custom_categories: sanitizeDefinitions(message.custom_categories),
         detect_categories: message.detect_categories === true,
+        occasion: sanitizeOccasion(message.occasion),
         ...(identity?.kind === "user" ? { owner_user_id: identity.userId } : {}),
         ...(identity?.kind === "operator" ? { operator_owned: true as const } : {}),
       };
@@ -750,6 +795,12 @@ export class SessionDO implements DurableObject {
       }
       if (message.detect_categories !== undefined) {
         meta.detect_categories = message.detect_categories === true;
+      }
+      // Same rule for the occasion: a reconnect hello that carries it is
+      // authoritative (a `session.occasion` may have raced a dying socket),
+      // and one that omits it — an older client — leaves it alone.
+      if (message.occasion !== undefined) {
+        meta.occasion = sanitizeOccasion(message.occasion);
       }
       // Retention may NARROW on a reconnect hello — the fallback for a
       // `session.retention` frame that raced a dying socket (a tag applied
@@ -1010,7 +1061,14 @@ export class SessionDO implements DurableObject {
     const knownCommitments = hotState?.last_commitment ? [hotState.last_commitment.text] : [];
     const knownOpenAsks = (hotState?.open_asks ?? []).map((a) => a.text);
     const [combined, custom] = await Promise.all([
-      runCombinedAnalysis(config, window, knownCommitments, knownOpenAsks, userContext),
+      runCombinedAnalysis(
+        config,
+        window,
+        knownCommitments,
+        knownOpenAsks,
+        userContext,
+        meta.occasion ?? "conversation",
+      ),
       runCustomCategories(
         config,
         window,
@@ -1110,12 +1168,15 @@ export class SessionDO implements DurableObject {
         this.env,
         targets,
         async (shadowConfig) => {
+          // The session's own occasion, so a lecture is priced on the
+          // prompt it actually runs.
           const outcome = await runCombinedAnalysis(
             shadowConfig,
             window,
             knownCommitments,
             knownOpenAsks,
             userContext,
+            meta.occasion ?? "conversation",
           );
           return {
             ok: outcome.failure === undefined,
@@ -1558,6 +1619,10 @@ export class SessionDO implements DurableObject {
     window: TranscriptSegment[],
   ): Promise<string | null> {
     if (window.length === 0) return null;
+    // Conversation-only, whatever the session's occasion: these are the
+    // single-purpose schemas (which double as the portable agent tools), and
+    // they have no lecture variant. A pull is answered from hot state first,
+    // which a lecture's ticks already filled with lecture-shaped items.
     // Same user context the periodic ticks see — a pull is a read, though,
     // so it never consumes an ephemeral attachment.
     const userContext = (await this.listAttachments())
