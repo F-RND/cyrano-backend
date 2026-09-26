@@ -518,6 +518,69 @@ describe("SessionDO occasion", () => {
     expect(JSON.parse(sentBodies(fetchMock)[0]!).system[0].text).toBe(lecturePrompts.teaching);
   });
 
+  /** The agent context read, as the MCP server and agent keys make it. */
+  async function agentContext(s: ReturnType<typeof makeSession>): Promise<{ text: string; body: Record<string, unknown> }> {
+    const response = await s.session.fetch(new Request(`https://session/agent/sessions/${SESSION_ID}/context`));
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    return { text, body: JSON.parse(text) as Record<string, unknown> };
+  }
+
+  it("names a lecture and its role in the agent context, right after `ended`", async () => {
+    for (const occasion of ["lecture.listening", "lecture.teaching"] as const) {
+      const s = makeSession();
+      await s.hello({ occasion });
+      const { body } = await agentContext(s);
+      expect(body.occasion).toBe(occasion);
+      expect(Object.keys(body).slice(0, 5)).toEqual(["session_id", "retention", "ended", "occasion", "recent_segments"]);
+    }
+
+    // A mid-session switch reaches the next read, both ways.
+    const s = makeSession();
+    const ws = await s.hello();
+    await s.frame(ws, { type: "session.occasion", session_id: SESSION_ID, occasion: "lecture.teaching" });
+    expect((await agentContext(s)).body.occasion).toBe("lecture.teaching");
+    await s.frame(ws, { type: "session.occasion", session_id: SESSION_ID, occasion: "conversation" });
+    expect((await agentContext(s)).body).not.toHaveProperty("occasion");
+  });
+
+  it("leaves a conversation's agent context byte-for-byte as it was, old metas included", async () => {
+    const conversation = makeSession();
+    await conversation.hello();
+    const { text, body } = await agentContext(conversation);
+    expect(body).not.toHaveProperty("occasion");
+    expect(Object.keys(body)).toEqual([
+      "session_id",
+      "retention",
+      "ended",
+      "recent_segments",
+      "transcript_range",
+      "transcript_notes",
+      "hot_state",
+      "hot_state_lag_seq",
+      "open_asks_actionable",
+      "open_asks_filtered",
+      "session_notes",
+      "agent_messages",
+      "attachments",
+    ]);
+
+    // A lecture's payload is that same text with the one key added.
+    const lecture = makeSession();
+    await lecture.hello({ occasion: "lecture.listening" });
+    const { occasion, ...rest } = (await agentContext(lecture)).body;
+    expect(occasion).toBe("lecture.listening");
+    expect(JSON.stringify(rest)).toBe(text);
+
+    // A meta stored before occasions existed has no field at all.
+    const old = makeSession();
+    await old.hello();
+    const meta = await old.storage.get<Record<string, unknown>>("meta");
+    delete meta!.occasion;
+    await old.storage.put("meta", meta);
+    expect((await agentContext(old)).text).toBe(text);
+  });
+
   it("the price-test shadow call prices the lecture prompt the session actually ran", async () => {
     const fetchMock = vi.fn(async () => toolReply(FULL_REPLY));
     vi.stubGlobal("fetch", fetchMock);

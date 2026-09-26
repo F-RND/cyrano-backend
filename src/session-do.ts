@@ -2025,6 +2025,11 @@ export class SessionDO implements DurableObject {
       session_id: meta.session_id,
       retention: meta.retention,
       ended: meta.ended,
+      // A lecture says so, and whose side of the lectern the user is on, so an
+      // assistant reads a study cue as one and writes a recap for the right
+      // audience. Omitted for a conversation (and for a meta stored before
+      // occasions existed): that payload stays byte-for-byte what it was.
+      ...(meta.occasion && meta.occasion !== "conversation" ? { occasion: meta.occasion } : {}),
       recent_segments: selection.segments,
       // Where the returned window sits in the whole session, so a consumer can
       // tell "this is everything" from "this is the last two minutes" instead

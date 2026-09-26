@@ -74,6 +74,7 @@ Layout:
 | `src/auth.ts`, `src/entitlement.ts`, `src/license.ts`, `src/promo.ts`, `src/trial.ts` | Identity, plans, and the key formats |
 | `src/stripe.ts`, `src/appstore*.ts` | Optional hosted-tier billing, inert without their secrets |
 | `src/chatgpt-mcp.ts` | OAuth 2.1 / PKCE authorization server and MCP resource for connector clients |
+| `src/mcp/workflows.json` | The text of every MCP workflow, shared with the app's local catalog |
 | `schemas/` | JSON schemas for every forced tool call the model makes |
 | `test/` | Vitest unit and integration tests |
 
@@ -93,6 +94,10 @@ Past sessions are answered by the user's Mac over its standing account-inbox soc
 | `cyrano_get_session` | the Mac | `device_unreachable`, unless the session has a stored free-cold copy |
 | `cyrano_list_tags` | the Mac: name, slug, session count, last use, `course` details, `withheld` | rebuilt from the index's tag names and marked `source: "index"`, without `course` or `withheld` |
 | `cyrano_tag_context` | the Mac: one rollup of up to 20 tagged sessions from the last 90 days | `device_unreachable` plus the index's tagged sessions, for the assistant to read one at a time with `cyrano_get_session` |
+
+`cyrano_workflow` runs the guided workflows: `review`, `catch_me_up`, `to_requirements`, `follow_ups` and `prep`; the loops `watch_notes` and `listen`; and, for lectures, `study_guide`, `flashcards`, `quiz` and `lecture_recap`. A one-shot workflow runs over the live session, or, given a `tag`, over that tag's `cyrano_tag_context` rollup. When the Mac can't build the rollup, the directive says so and carries the same index fallback. The live context names a lecture's `occasion` (`lecture.listening` or `lecture.teaching`); a conversation's payload has no such key.
+
+Every workflow's text lives in [`src/mcp/workflows.json`](src/mcp/workflows.json). This server renders from it, and the app's local MCP catalog carries the same strings under a test that compares them with this file. To change a workflow's wording, change the JSON first.
 
 ## Configuration reference
 
