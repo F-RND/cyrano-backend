@@ -382,3 +382,472 @@ describe("cyrano_get_session origin read", () => {
     });
   });
 });
+
+// ---- Origin-pull tools, end to end through the MCP handler ----
+//
+// A fake registry (token → a user with both scopes) and a fake account inbox
+// (the cached index, and a scripted device behind /origin), so each test reads
+// exactly what an assistant would get back.
+
+type McpEnv = Parameters<typeof chatGPTMCPTesting.handleMCP>[1];
+type Forwarded = { method: string; path: string; query: Record<string, string>; client: string | null };
+
+function fakeEnv(options: {
+  index?: unknown;
+  origin?: (forwarded: Forwarded) => Response;
+  scope?: string;
+}): { env: McpEnv; forwarded: Forwarded[]; indexReads: () => number } {
+  const forwarded: Forwarded[] = [];
+  let indexReads = 0;
+  const stub = (answer: (url: URL, init?: RequestInit) => Response) => ({
+    fetch: async (input: string | URL, init?: RequestInit) => answer(new URL(String(input)), init),
+  });
+  const env = {
+    REGISTRY_DO: {
+      idFromName: (name: string) => name,
+      get: () => stub(() => Response.json({
+        valid: true,
+        kind: "user",
+        user_id: "u-1",
+        scope: options.scope ?? "context:read context:write",
+        client_name: "Claude",
+        label: "Claude",
+      })),
+    },
+    ACCOUNT_INBOX_DO: {
+      idFromName: (name: string) => name,
+      get: () => stub((url, init) => {
+        if (url.pathname === "/index") {
+          indexReads += 1;
+          return Response.json({ index: options.index ?? null, device_online: false });
+        }
+        const body = JSON.parse(String(init?.body)) as Forwarded;
+        forwarded.push(body);
+        return options.origin
+          ? options.origin(body)
+          : Response.json({ device_online: false }, { status: 503 });
+      }),
+    },
+  };
+  return { env: env as unknown as McpEnv, forwarded, indexReads: () => indexReads };
+}
+
+async function rpc(env: McpEnv, method: string, params?: Record<string, unknown>) {
+  const response = await chatGPTMCPTesting.handleMCP(new Request("https://api.cyrano.example/mcp", {
+    method: "POST",
+    headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, ...(params ? { params } : {}) }),
+  }), env);
+  return response.json() as Promise<{
+    result?: {
+      structuredContent?: Record<string, unknown>;
+      isError?: boolean;
+      tools?: Array<{ name: string }>;
+      instructions?: string;
+    };
+    error?: { code: number; message: string };
+  }>;
+}
+
+async function callTool(env: McpEnv, name: string, args: Record<string, unknown> = {}) {
+  const reply = await rpc(env, "tools/call", { name, arguments: args });
+  expect(reply.result?.isError).toBeUndefined();
+  return reply.result?.structuredContent as Record<string, unknown>;
+}
+
+const device = (status: number, body: unknown) =>
+  () => Response.json({ status, body, device: "Jo's MacBook" });
+const ACCOUNT = { kind: "user", user_id: "u-1", connection: "Claude" };
+
+describe("cyrano_get_session through the shared origin read", () => {
+  it("forwards exactly the read it always did", async () => {
+    const { env, forwarded } = fakeEnv({ origin: device(200, { title: "Standup" }) });
+    expect(await callTool(env, "cyrano_get_session", { session_id: " sess-1 " })).toEqual({
+      ok: true,
+      session: { title: "Standup" },
+      device: "Jo's MacBook",
+      account: ACCOUNT,
+    });
+    expect(forwarded).toEqual([{
+      method: "GET",
+      path: "/context",
+      query: { session: "sess-1", transcript: "full" },
+      client: "Claude",
+    }]);
+  });
+
+  it("names each way the device can fail to answer, in the same words", async () => {
+    const cases: Array<[number, string, string]> = [
+      [503, "device_unreachable", "The user's device is asleep or offline, so the conversation could not be fetched. Cyrano does not keep a copy on its servers — this content only exists on their device. Ask them to wake it and try again."],
+      [504, "device_timed_out", "The user's device is connected but did not answer in time. Try once more; if it keeps happening, their device may be busy or on a poor connection."],
+      [429, "too_many_requests", "Too many session reads are in flight for this account. Wait for the ones you already issued, then continue one at a time — do not retry in a loop."],
+    ];
+    for (const [status, reason, detail] of cases) {
+      const { env } = fakeEnv({ origin: () => Response.json({}, { status }) });
+      expect(await callTool(env, "cyrano_get_session", { session_id: "sess-1" })).toEqual({
+        ok: false,
+        reason,
+        detail,
+        account: ACCOUNT,
+      });
+    }
+  });
+
+  it("relays the device's own refusal, and its 404 as no_such_session", async () => {
+    const gone = fakeEnv({ origin: device(404, { error: "no session with that id" }) });
+    expect(await callTool(gone.env, "cyrano_get_session", { session_id: "sess-1" })).toEqual({
+      ok: false,
+      reason: "no_such_session",
+      detail: "no session with that id",
+      account: ACCOUNT,
+    });
+    const scoped = fakeEnv({ origin: device(403, { error: "outside your sharing scope" }) });
+    expect(await callTool(scoped.env, "cyrano_get_session", { session_id: "sess-1" })).toMatchObject({
+      reason: "refused_by_device",
+      detail: "outside your sharing scope",
+    });
+    const mute = fakeEnv({ origin: device(403, null) });
+    expect(await callTool(mute.env, "cyrano_get_session", { session_id: "sess-1" })).toMatchObject({
+      reason: "refused_by_device",
+      detail: "The user's device declined to serve that session.",
+    });
+    // A broker answer with no device envelope reads as a refusal, not success.
+    const junk = fakeEnv({ origin: () => new Response("not json") });
+    expect(await callTool(junk.env, "cyrano_get_session", { session_id: "sess-1" })).toMatchObject({
+      ok: false,
+      reason: "refused_by_device",
+    });
+  });
+
+  it("asks for an id before it asks the device anything", async () => {
+    const { env, forwarded } = fakeEnv({ origin: device(200, {}) });
+    expect(await callTool(env, "cyrano_get_session", { session_id: "  " })).toEqual({
+      ok: false,
+      reason: "missing_session_id",
+      detail: "Call cyrano_list_sessions first and pass one of its `id` values.",
+      account: ACCOUNT,
+    });
+    expect(forwarded).toEqual([]);
+  });
+});
+
+describe("Tag tools over origin-pull", () => {
+  const { tagSlug, tagsFromIndex, tagContextOriginQuery, listTagsTool, tagContextTool, listSessionsTool } =
+    chatGPTMCPTesting;
+
+  const DAY = 86_400_000;
+  const T0 = Date.UTC(2026, 8, 1, 14); // 2026-09-01T14:00:00Z
+  const ROWS = [
+    { id: "s4", title: "BIO 201, week 4", started_at: T0 + 21 * DAY, tags: ["BIO 201"], stored: true },
+    { id: "s3", title: "Acme sync", started_at: T0 + 14 * DAY, tags: ["Acme Corp."] },
+    { id: "s2", title: "BIO 201, week 2", started_at: T0 + 7 * DAY, tags: ["BIO 201", "Café"] },
+    { id: "s1", title: "BIO 201, week 1", started_at: T0, tags: ["bio 201"] },
+    { id: "s0", title: "Untagged", started_at: T0 - DAY },
+  ];
+  const INDEX = { sessions: ROWS, built_at: T0 + 30 * DAY, device: "Jo's MacBook", scope: "all" };
+  const COURSE = {
+    code: "BIO 201",
+    title: "Cell Biology",
+    instructor: "Dr. Okafor",
+    meetings: ["Tue 10:00–11:15", "Thu 10:00–11:15"],
+    term_start: "2026-08-24T04:00:00Z",
+    term_end: "2026-12-11T05:00:00Z",
+    upcoming_exams: [{ name: "Midterm", date: "2026-10-15T14:00:00Z" }],
+  };
+  const offline = () => Response.json({ device_online: false }, { status: 503 });
+  const slow = () => Response.json({ device_online: true, timed_out: true }, { status: 504 });
+
+  it("folds tag names to the slugs the device resolves", () => {
+    // Every expected value here is SessionTag.slug(from:) run on the same
+    // input by the Swift toolchain, edge cases included.
+    const swift: Array<[string, string]> = [
+      ["Acme Corp.", "acme-corp"],
+      ["Café", "cafe"],
+      ["  R&D  ", "r-d"],
+      ["!!!", ""],
+      ["Straße", "strasse"],
+      ["ıstanbul", "stanbul"],
+      ["İstanbul", "istanbul"],
+      ["ＦＵＬＬ width", "full-width"],
+      ["ﬁle", "file"],
+      ["CS 101: Intro", "cs-101-intro"],
+      ["Ångström Øresund Æsir Łódź", "angstrom-resund-sir-odz"],
+      ["数学 101", "101"],
+      ["#acme", "acme"],
+      ["a-very-long-course-name-that-goes-past-thirty-two", "a-very-long-course-name-that-goe"],
+      ["ǅemal", "emal"],
+      ["Ⅻ roman", "roman"],
+      ["²nd", "nd"],
+    ];
+    for (const [name, slug] of swift) expect([name, tagSlug(name)]).toEqual([name, slug]);
+  });
+
+  it("rebuilds a tag list from index rows: one entry per slug, newest first", () => {
+    expect(tagsFromIndex(ROWS)).toEqual([
+      // "bio 201" on the oldest row folds into the same tag; the newest
+      // row's spelling is the one shown.
+      { name: "BIO 201", slug: "bio-201", sessions: 3, last_used: "2026-09-22T14:00:00Z" },
+      { name: "Acme Corp.", slug: "acme-corp", sessions: 1, last_used: "2026-09-15T14:00:00Z" },
+      { name: "Café", slug: "cafe", sessions: 1, last_used: "2026-09-08T14:00:00Z" },
+    ]);
+    // A row listing one tag twice counts once; junk rows and slugless names
+    // are skipped rather than invented into tags.
+    expect(tagsFromIndex([
+      { id: "a", started_at: T0, tags: ["Lab", "lab", "!!!"] },
+      null,
+      "junk",
+      { id: "b", tags: ["Lab"] },
+    ])).toEqual([{ name: "Lab", slug: "lab", sessions: 2, last_used: "2026-09-01T14:00:00Z" }]);
+  });
+
+  it("lists tags from the device untouched, course included", async () => {
+    const tags = [
+      { name: "BIO 201", slug: "bio-201", sessions: 3, last_used: "2026-09-22T14:00:00Z", course: COURSE },
+      { name: "Acme", slug: "acme", sessions: 1 },
+    ];
+    const { env, forwarded, indexReads } = fakeEnv({
+      index: INDEX,
+      origin: device(200, { tags, withheld: 1 }),
+    });
+    const result = await callTool(env, "cyrano_list_tags");
+    expect(result).toEqual({
+      ok: true,
+      tags,
+      withheld: 1,
+      source: "device",
+      device: "Jo's MacBook",
+      account: ACCOUNT,
+    });
+    expect((result.tags as Array<{ course?: unknown }>)[0]?.course).toEqual(COURSE);
+    expect(forwarded).toEqual([{ method: "GET", path: "/tags", query: {}, client: "Claude" }]);
+    // The live answer is the whole answer; the index is not consulted.
+    expect(indexReads()).toBe(0);
+  });
+
+  it("falls back to the index when the Mac is offline or slow, and says what is missing", async () => {
+    for (const [origin, lead] of [[offline, /asleep or offline/], [slow, /did not answer in time/]] as const) {
+      const { env } = fakeEnv({ index: INDEX, origin });
+      const result = await callTool(env, "cyrano_list_tags");
+      expect(result).toEqual({
+        ok: true,
+        tags: tagsFromIndex(ROWS),
+        source: "index",
+        notice: expect.stringMatching(lead),
+        built_at: INDEX.built_at,
+        account: ACCOUNT,
+      });
+      // Course details and the hidden-tag count live only on the Mac; the
+      // copy must not look like a course with no schedule.
+      expect(result.notice).toMatch(/Course details/);
+      expect(result.notice).toMatch(/hidden from assistants/);
+      expect(result.notice).toMatch(/missing here, not absent/);
+      expect(result).not.toHaveProperty("withheld");
+      expect(JSON.stringify(result.tags)).not.toContain("course");
+    }
+  });
+
+  it("reports the device state plainly when there is no index to fall back on", async () => {
+    const none = fakeEnv({ origin: offline });
+    expect(await callTool(none.env, "cyrano_list_tags")).toEqual({
+      ok: false,
+      reason: "device_unreachable",
+      detail: expect.stringContaining("so their tag list could not be fetched"),
+      account: ACCOUNT,
+    });
+    // Too many reads in flight is not "offline": no fallback, no index read.
+    const busy = fakeEnv({ index: INDEX, origin: () => Response.json({}, { status: 429 }) });
+    expect(await callTool(busy.env, "cyrano_list_tags")).toMatchObject({
+      ok: false,
+      reason: "too_many_requests",
+    });
+    expect(busy.indexReads()).toBe(0);
+    const refused = fakeEnv({ index: INDEX, origin: device(403, { error: "Reading past sessions remotely is turned off" }) });
+    expect(await callTool(refused.env, "cyrano_list_tags")).toEqual({
+      ok: false,
+      reason: "refused_by_device",
+      detail: "Reading past sessions remotely is turned off",
+      account: ACCOUNT,
+    });
+  });
+
+  it("forwards a tag rollup and relays the device's document as is", async () => {
+    const rollup = {
+      day: "2026-09-26T04:00:00Z",
+      sections: [{ title: "Decided", items: ["Lab reports move to Fridays"], note: null }],
+      tag: "BIO 201",
+      truncated: true,
+      considered: 23,
+    };
+    const { env, forwarded, indexReads } = fakeEnv({ index: INDEX, origin: device(200, rollup) });
+    expect(await callTool(env, "cyrano_tag_context", { tag: " BIO 201 ", limit: 5 })).toEqual({
+      ok: true,
+      ...rollup,
+      source: "device",
+      device: "Jo's MacBook",
+      account: ACCOUNT,
+    });
+    expect(forwarded).toEqual([{
+      method: "GET",
+      path: "/tag_context",
+      query: { tag: "BIO 201", limit: "5" },
+      client: "Claude",
+    }]);
+    expect(indexReads()).toBe(0);
+
+    // The device's own empty-rollup diagnosis comes through as its words.
+    const empty = { day: rollup.day, sections: [], reason: "noStoredSessions", notice: "No sessions carry the tag \"Physics\"." };
+    const none = fakeEnv({ origin: device(200, empty) });
+    expect(await callTool(none.env, "cyrano_tag_context", { tag: "Physics" })).toMatchObject({ ok: true, ...empty });
+  });
+
+  it("hands over the tagged sessions from the index when the Mac can't build the rollup", async () => {
+    const { env } = fakeEnv({ index: INDEX, origin: offline });
+    const result = await callTool(env, "cyrano_tag_context", { tag: "#bio-201" });
+    expect(result).toEqual({
+      ok: false,
+      reason: "device_unreachable",
+      detail: expect.stringContaining("cyrano_get_session"),
+      tag: "#bio-201",
+      source: "index",
+      sessions: [ROWS[0], ROWS[2], ROWS[3]],
+      built_at: INDEX.built_at,
+      account: ACCOUNT,
+    });
+    expect(result.detail).toMatch(/asleep or offline/);
+    expect(result.detail).toMatch(/`stored`/);
+    expect(result.detail).toMatch(/session by session, not from the distilled rollup/);
+
+    // Bounded like the rollup, and says so the same way.
+    const capped = await callTool(env, "cyrano_tag_context", { tag: "BIO 201", limit: 2 });
+    expect(capped.sessions).toEqual([ROWS[0], ROWS[2]]);
+    expect(capped).toMatchObject({ truncated: true, considered: 3 });
+
+    const slowEnv = fakeEnv({ index: INDEX, origin: slow });
+    expect(await callTool(slowEnv.env, "cyrano_tag_context", { tag: "café" })).toMatchObject({
+      reason: "device_timed_out",
+      detail: expect.stringContaining("Try once more"),
+      sessions: [ROWS[2]],
+    });
+  });
+
+  it("says why the fallback list is empty", async () => {
+    const unknown = fakeEnv({ index: INDEX, origin: offline });
+    expect(await callTool(unknown.env, "cyrano_tag_context", { tag: "Physics" })).toMatchObject({
+      reason: "device_unreachable",
+      sessions: [],
+      detail: expect.stringContaining("No session in the index the Mac last published carries this tag"),
+    });
+    const noIndex = fakeEnv({ origin: offline });
+    const result = await callTool(noIndex.env, "cyrano_tag_context", { tag: "BIO 201" });
+    expect(result).toMatchObject({ reason: "device_unreachable", sessions: [] });
+    expect(result.detail).toMatch(/No session index has been published/);
+    expect(result).not.toHaveProperty("built_at");
+  });
+
+  it("validates tag_context arguments the way the local tool does", async () => {
+    const { env, forwarded } = fakeEnv({ index: INDEX, origin: device(200, {}) });
+    for (const args of [{}, { tag: "   " }, { tag: 42 }]) {
+      expect(await callTool(env, "cyrano_tag_context", args)).toEqual({
+        ok: false,
+        reason: "missing_tag",
+        detail: expect.stringContaining("cyrano_list_tags"),
+        account: ACCOUNT,
+      });
+    }
+    expect(forwarded).toEqual([]);
+
+    // The limit is clamped into the device's 1…20, not refused; a value that
+    // isn't a number is dropped so the device applies its default.
+    expect(tagContextOriginQuery({ tag: "x", limit: 50 })).toEqual({ tag: "x", limit: "20" });
+    expect(tagContextOriginQuery({ tag: "x", limit: 0 })).toEqual({ tag: "x", limit: "1" });
+    expect(tagContextOriginQuery({ tag: "x", limit: -3 })).toEqual({ tag: "x", limit: "1" });
+    expect(tagContextOriginQuery({ tag: "x", limit: 3.7 })).toEqual({ tag: "x", limit: "3" });
+    expect(tagContextOriginQuery({ tag: "x", limit: "7" })).toEqual({ tag: "x", limit: "7" });
+    for (const limit of ["abc", "", undefined, null, Number.NaN]) {
+      expect(tagContextOriginQuery({ tag: "x", limit })).toEqual({ tag: "x" });
+    }
+    expect(tagContextOriginQuery({ tag: "y".repeat(200) })?.tag).toHaveLength(80);
+
+    expect(tagContextTool.inputSchema.required).toEqual(["tag"]);
+    expect(tagContextTool.inputSchema.properties.limit).toMatchObject({ minimum: 1, maximum: 20 });
+    expect(listTagsTool.inputSchema.properties).toEqual({});
+  });
+
+  it("describes both tools for a remote client: read-only, and honest about the fallback", () => {
+    for (const tool of [listTagsTool, tagContextTool]) {
+      expect(tool.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+      // cyrano_today is a local-bridge tool; naming it here sends an
+      // assistant after a tool it cannot call.
+      expect(tool.description).not.toContain("cyrano_today");
+    }
+    expect(listTagsTool.description).toContain("`course`");
+    expect(listTagsTool.description).toContain("`withheld`");
+    expect(listTagsTool.description).toContain('`source: "index"`');
+    expect(tagContextTool.description).toMatch(/`truncated`.*`considered`/);
+    expect(tagContextTool.description).toContain("cyrano_get_session");
+  });
+
+  it("filters cyrano_list_sessions by a tag's name or slug", async () => {
+    const { env } = fakeEnv({ index: INDEX });
+    const all = await callTool(env, "cyrano_list_sessions");
+    expect(all.sessions).toEqual(ROWS);
+    expect(all).not.toHaveProperty("filtered");
+
+    const ids = async (args: Record<string, unknown>) =>
+      ((await callTool(env, "cyrano_list_sessions", args)).sessions as Array<{ id: string }>).map((s) => s.id);
+    expect(await ids({ tag: "BIO 201" })).toEqual(["s4", "s2", "s1"]);
+    expect(await ids({ tag: "bio-201" })).toEqual(["s4", "s2", "s1"]);
+    expect(await ids({ tag: "#acme-corp" })).toEqual(["s3"]);
+    expect(await ids({ tag: "ACME CORP" })).toEqual(["s3"]);
+    expect(await ids({ tag: "cafe" })).toEqual(["s2"]);
+    // The cap applies to what matched, not to the index before filtering.
+    expect(await ids({ tag: "bio 201", limit: 2 })).toEqual(["s4", "s2"]);
+    // A blank tag is no filter.
+    expect(await ids({ tag: "  " })).toEqual(["s4", "s3", "s2", "s1", "s0"]);
+
+    const filtered = await callTool(env, "cyrano_list_sessions", { tag: "BIO 201" });
+    expect(filtered).toMatchObject({ filtered: true, built_at: INDEX.built_at, scope: "all" });
+    expect(filtered).not.toHaveProperty("notice");
+
+    // An empty filtered list must not read as "the user has no sessions".
+    const miss = await callTool(env, "cyrano_list_sessions", { tag: "Physics" });
+    expect(miss).toMatchObject({ sessions: [], filtered: true });
+    expect(miss.notice).toMatch(/No session in the index carries the tag "Physics"/);
+    expect(miss.notice).toMatch(/cyrano_list_tags/);
+
+    const noIndex = fakeEnv({});
+    expect((await callTool(noIndex.env, "cyrano_list_sessions", { tag: "BIO 201" })).notice)
+      .toMatch(/No session index has been published/);
+
+    expect(listSessionsTool.inputSchema.properties.tag.type).toBe("string");
+    expect(listSessionsTool.inputSchema.properties.tag.description).toMatch(/cyrano_list_tags/);
+  });
+
+  it("registers both tools under context:read, and only there", async () => {
+    const read = fakeEnv({ scope: "context:read" });
+    const listed = (await rpc(read.env, "tools/list")).result?.tools?.map((t) => t.name);
+    expect(listed).toEqual([
+      "cyrano_get_live_context",
+      "cyrano_workflow",
+      "cyrano_list_sessions",
+      "cyrano_get_session",
+      "cyrano_list_tags",
+      "cyrano_tag_context",
+    ]);
+    const unknown = await rpc(read.env, "tools/call", { name: "cyrano_today", arguments: {} });
+    expect(unknown.error?.message).toContain("cyrano_list_tags, cyrano_tag_context");
+
+    const write = fakeEnv({ scope: "context:write", origin: device(200, { tags: [], withheld: 0 }) });
+    const writeListed = (await rpc(write.env, "tools/list")).result?.tools?.map((t) => t.name);
+    expect(writeListed).toEqual(["cyrano_add_session_note", "cyrano_send_reply"]);
+    const refused = await rpc(write.env, "tools/call", { name: "cyrano_list_tags", arguments: {} });
+    expect(refused.error?.code).toBe(-32602);
+    expect(write.forwarded).toEqual([]);
+
+    const init = await rpc(read.env, "initialize", { protocolVersion: "2025-06-18" });
+    const instructions = init.result?.instructions ?? "";
+    expect(instructions).toContain("watch_notes");
+    expect(instructions).toContain("cyrano_list_tags");
+    expect(instructions).toContain("cyrano_tag_context");
+  });
+});

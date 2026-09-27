@@ -81,6 +81,19 @@ Layout:
 
 A client may send `llm_api_key` (with `llm_provider` `anthropic`, `openrouter` or `openai`, and an `llm_model` — required for the latter two; a request that omits it is refused with `llm_model_required` rather than run on a guessed model) in its session `hello`. That session then runs on the user's key and the user's provider; the operator's `LLM_API_KEY` is not touched, usage is counted but not priced, and the operator's fallback leg is never applied. The key is never written to session storage: it lives in the Durable Object's memory and in the WebSocket's attachment (which Cloudflare keeps only for the socket's lifetime, so it survives hibernation but not a disconnect), and is cleared on the next `hello` that omits it.
 
+## Remote MCP connectors
+
+`/mcp` is an OAuth-protected MCP server that ChatGPT, Claude (custom connectors) and other remote clients pair with from the app's Settings → Connections. With `context:read` it offers `cyrano_get_live_context` and `cyrano_workflow` over the session being relayed now, plus four reads of past sessions; `context:write` adds `cyrano_add_session_note` and `cyrano_send_reply`.
+
+Past sessions are answered by the user's Mac over its standing account-inbox socket (origin-pull), through the same gates as the app's local MCP bridge. The Worker relays the answer and stores none of it. The index the Mac publishes (ids, titles, times and tag names, no transcript) is cached, so what can be answered from it still answers while the Mac is asleep, and a phone-only account still gets something useful:
+
+| Tool | Answered by | When the Mac is away |
+| --- | --- | --- |
+| `cyrano_list_sessions` | the cached index; `tag` narrows it to one tag, by name or slug | the same list, with `device_online: false` |
+| `cyrano_get_session` | the Mac | `device_unreachable`, unless the session has a stored free-cold copy |
+| `cyrano_list_tags` | the Mac: name, slug, session count, last use, `course` details, `withheld` | rebuilt from the index's tag names and marked `source: "index"`, without `course` or `withheld` |
+| `cyrano_tag_context` | the Mac: one rollup of up to 20 tagged sessions from the last 90 days | `device_unreachable` plus the index's tagged sessions, for the assistant to read one at a time with `cyrano_get_session` |
+
 ## Configuration reference
 
 ### Where values go
