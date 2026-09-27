@@ -110,6 +110,31 @@ export interface WhisperCandidate {
 
 export type WhisperFeedbackKind = "delivered" | "dismissed" | "barged" | "expired";
 
+/**
+ * What a session is (added 2026-09-26), which changes what the combined
+ * analysis pass extracts. "conversation" is every session before this
+ * existed. A lecture carries the user's role: "lecture.listening" (a student
+ * in the room) or "lecture.teaching" (the instructor recording their own
+ * class). The schema keys never change — a lecture swaps the combined pass's
+ * system prompt, and subtext is always empty in one.
+ */
+export type SessionOccasionWire = "conversation" | "lecture.listening" | "lecture.teaching";
+
+export const SESSION_OCCASIONS: readonly SessionOccasionWire[] = [
+  "conversation",
+  "lecture.listening",
+  "lecture.teaching",
+];
+
+/** The wire type is a fiction: a frame can carry any value. Anything this
+ * server doesn't recognise (a newer client's occasion, a typo, a non-string)
+ * reads as "conversation", today's behaviour, rather than being refused. */
+export function sanitizeOccasion(value: unknown): SessionOccasionWire {
+  return SESSION_OCCASIONS.includes(value as SessionOccasionWire)
+    ? (value as SessionOccasionWire)
+    : "conversation";
+}
+
 // ---- Client -> Server ----
 
 export interface ClientHelloMessage {
@@ -200,6 +225,16 @@ export interface ClientHelloMessage {
    * hosted analysis it was already paying for.
    */
   relay_only?: boolean;
+  /**
+   * What this session is (added 2026-09-26): "conversation",
+   * "lecture.listening" or "lecture.teaching" — see SessionOccasionWire.
+   * Optional and additive: absent or unrecognised reads as "conversation",
+   * so an older client is unaffected. Stored with the session at the first
+   * hello; a reconnect hello changes it only when the field is present (like
+   * custom_categories), and `session.occasion` changes it mid-session. Typed
+   * as a plain string because the server sanitizes whatever arrives.
+   */
+  occasion?: string;
 }
 
 export interface ClientTranscriptMessage {
@@ -281,6 +316,21 @@ export interface ClientSessionRetentionMessage {
   retention: RetentionPolicy;
 }
 
+/**
+ * Change the live session's occasion mid-session (the user corrected the
+ * picker, or accepted the app's suggestion that they are the one teaching).
+ * Routed like `session.retention` — a frame naming a different session is
+ * ignored — and sanitized like the hello field. Applies from the next
+ * analysis tick; windows already analyzed keep what they found. A server
+ * that predates this frame ignores it (handleMessage has no default case),
+ * exactly as it ignores the hello field.
+ */
+export interface ClientSessionOccasionMessage {
+  type: "session.occasion";
+  session_id: string;
+  occasion: string;
+}
+
 export type ClientMessage =
   | ClientHelloMessage
   | ClientTranscriptMessage
@@ -290,7 +340,8 @@ export type ClientMessage =
   | ClientSessionEndMessage
   | ClientSessionExtendMessage
   | ClientSessionRetentionMessage
-  | ClientAgentMessage;
+  | ClientAgentMessage
+  | ClientSessionOccasionMessage;
 
 // ---- Server -> Client ----
 
@@ -567,8 +618,18 @@ export interface AgentReplyInput {
  * parallel ones server-side would fork it. The kind rides along as a prefix the
  * user can read and search ("Reminder: try Kimi K3"), and the app can promote
  * to a real task later without a wire change.
+ *
+ * "study_cue" (added 2026-09-26) is something a lecturer flagged for the exam
+ * or the study guide. An app build that predates it decodes the unknown kind
+ * as a plain note, so adding it needs no client gate.
  */
-export type AgentNoteKind = "note" | "reminder" | "decision" | "commitment" | "follow_up";
+export type AgentNoteKind =
+  | "note"
+  | "reminder"
+  | "decision"
+  | "commitment"
+  | "follow_up"
+  | "study_cue";
 
 export const AGENT_NOTE_KINDS: AgentNoteKind[] = [
   "note",
@@ -576,6 +637,7 @@ export const AGENT_NOTE_KINDS: AgentNoteKind[] = [
   "decision",
   "commitment",
   "follow_up",
+  "study_cue",
 ];
 
 /** Matches SessionNote.maxChars on the device: a note is shorthand, not a

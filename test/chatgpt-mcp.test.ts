@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { chatGPTMCPTesting } from "../src/chatgpt-mcp.js";
 import { chatGPTRegistryTesting } from "../src/registry-do.js";
+import { AGENT_NOTE_KINDS } from "../src/types.js";
 
 describe("ChatGPT MCP metadata", () => {
   it("uses the public HTTPS /mcp endpoint as the OAuth resource", () => {
@@ -353,6 +354,19 @@ describe("Refused writes explain themselves", () => {
     expect(addNoteTool.description).toMatch(/not saved/i);
     const reply = tools.find((t) => t.name === "cyrano_send_reply");
     expect(reply?.description).toMatch(/while the session is running/i);
+  });
+});
+
+describe("cyrano_add_session_note kinds", () => {
+  it("offers exactly the kinds the server keeps, study_cue included and explained", () => {
+    // A kind the tool offered but sanitizeAgentNote didn't know would land as
+    // a plain note with no error; one it knew but didn't offer is unreachable.
+    const kind = chatGPTMCPTesting.addNoteTool.inputSchema.properties.kind;
+    expect(kind.enum).toEqual(AGENT_NOTE_KINDS);
+    expect(kind.enum).toContain("study_cue");
+    expect(kind.description).toMatch(/"study_cue" is something the lecturer flagged for the exam or study guide/);
+    expect(kind.description).toMatch(/lecture sessions/);
+    expect(chatGPTMCPTesting.addNoteTool.description).toMatch(/study cue/);
   });
 });
 

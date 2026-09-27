@@ -28,6 +28,8 @@ Three Durable Object classes hold all state; there is no database to provision. 
 
 Stateless HTTP routes cover everything that does not need a live session: `/analyze` and `/ask` over a supplied transcript, `/dictation/polish`, `/context/refine`, and a `/health/llm` probe that spends one output token to verify a key.
 
+A session is a conversation unless the client says otherwise. The `hello` may carry `occasion`: `"lecture.listening"` (the user is a student in the room) or `"lecture.teaching"` (the user is the instructor), and a `session.occasion` frame changes it mid-session; `/analyze` takes the same optional field. A lecture runs the batched pass with its role's prompt from [`src/analysis/lecture-prompts.json`](src/analysis/lecture-prompts.json) against the same tool schema, and never extracts subtext. A missing or unrecognised value means `"conversation"`, so older clients see no change.
+
 ## Quick start
 
 You need Node.js 22.12+, a Cloudflare account with Workers and Durable Objects, and an Anthropic API key.
@@ -66,7 +68,7 @@ Layout:
 | --- | --- |
 | `src/index.ts` | Route table and request auth; forwards into the Durable Objects |
 | `src/session-do.ts`, `src/registry-do.ts`, `src/account-inbox-do.ts` | The three Durable Object classes |
-| `src/analysis/` | Windowing, the batched extraction pass, custom categories, whisper tiers, re-analysis, dictation polish |
+| `src/analysis/` | Windowing, the batched extraction pass and its lecture prompts, custom categories, whisper tiers, re-analysis, dictation polish |
 | `src/llm/` | Provider client (Anthropic native + OpenAI-compatible), fallback leg, pricing and spend metering |
 | `src/policy/` | The interruption-etiquette grammar and simulator that gates whisper delivery |
 | `src/auth.ts`, `src/entitlement.ts`, `src/license.ts`, `src/promo.ts`, `src/trial.ts` | Identity, plans, and the key formats |

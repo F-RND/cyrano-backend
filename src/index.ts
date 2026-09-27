@@ -9,6 +9,7 @@ import { resolveAnalysisLlmConfig, resolveStatelessLlmConfig, ClientLlmSelection
 import { createSpendLedger, isEmptyDelta, spendDeltaToWire } from "./llm/spend.js";
 import { priceTable, pricingOptionsFromEnv } from "./llm/pricing.js";
 import type { UsageDelta } from "./usage.js";
+import { sanitizeOccasion } from "./types.js";
 import { FREE_COLD_PLAN, sessionAnalysisAccess } from "./entitlement.js";
 import {
   MAX_REANALYZE_CHARS,
@@ -660,6 +661,8 @@ export default {
         llm_api_key?: string;
         llm_provider?: string;
         llm_model?: string;
+        /** Optional, like the hello field: absent or unknown is "conversation". */
+        occasion?: unknown;
       } | null;
       const lines = body ? sanitizeReanalyzeLines(body.transcript) : null;
       if (!lines || lines.length === 0) {
@@ -704,7 +707,7 @@ export default {
         throw e;
       }
 
-      const outcome = await reanalyzeTranscript(config, lines);
+      const outcome = await reanalyzeTranscript(config, lines, sanitizeOccasion(body?.occasion));
 
       // Meter what was actually spent on the same rule as polish/refine (our
       // key + a tenant identity only); metering must never break the pass. A
