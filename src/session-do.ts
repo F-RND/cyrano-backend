@@ -354,13 +354,17 @@ export function retentionAfterFrame(
  * frame naming a different session is ignored rather than applied to a
  * session it wasn't aimed at — but not one-way: the occasion is not a privacy
  * control, so a switch back to "conversation" is as valid as one away from
- * it. Sanitized like the hello field, so an unknown value reads as
- * "conversation". */
+ * it. A frame with no string occasion is malformed, not a request, and is
+ * ignored: it must not quietly turn a live lecture into a conversation. A
+ * string this server doesn't know (a newer client's occasion) is sanitized
+ * like the hello field and reads as "conversation", so switching to it lands
+ * where starting with it would. */
 export function occasionAfterFrame(
   meta: { session_id: string; occasion?: SessionOccasionWire },
   frame: { session_id: string; occasion: unknown },
 ): SessionOccasionWire | null {
   if (frame.session_id !== meta.session_id) return null;
+  if (typeof frame.occasion !== "string") return null;
   const occasion = sanitizeOccasion(frame.occasion);
   return occasion === (meta.occasion ?? "conversation") ? null : occasion;
 }
