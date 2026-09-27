@@ -6,8 +6,9 @@ import commitmentsTool from "../schemas/commitments.json";
 import asksTool from "../schemas/asks.json";
 import subtextTool from "../schemas/subtext.json";
 import suggestionsTool from "../schemas/suggestions.json";
+import lecturePrompts from "../src/analysis/lecture-prompts.json";
 import { sanitizeAttachment, toUserContextItem } from "../src/attachments.js";
-import { withUserContext } from "../src/analysis/passes.js";
+import { combinedAnalysisTool, withUserContext } from "../src/analysis/passes.js";
 import { buildCustomCategoriesTool, USER_CONTEXT_PROMPT } from "../src/analysis/custom.js";
 import {
   MAX_ATTACHMENT_IMAGE_B64_CHARS,
@@ -188,6 +189,32 @@ describe("pass schema contract", () => {
       expect(property.items.required).toEqual(["source", "text"]);
       expect(schema.input_schema.required).not.toContain("user_context");
       expect(schema.system_prompt).toContain(USER_CONTEXT_PROMPT);
+    });
+  }
+
+  // The lecture prompts are the app's on-device lecture text verbatim, so they
+  // carry the rule in the on-device spelling: no backticks, and the closing
+  // source_seq sentence as its own paragraph ("a transcript line's seq") —
+  // the same divergence parity_check.ts allows between analysis.json and the
+  // on-device conversation prompt. The rule itself must be there whole.
+  const PLAIN_USER_CONTEXT_RULE = USER_CONTEXT_PROMPT.replace(/`/g, "").replace(
+    / source_seq always references a transcript line\.$/,
+    "",
+  );
+  for (const [role, occasion] of [
+    ["listening", "lecture.listening"],
+    ["teaching", "lecture.teaching"],
+  ] as const) {
+    it(`the lecture ${role} prompt carries the shared rule and keeps the optional user_context`, () => {
+      const prompt = lecturePrompts[role];
+      expect(PLAIN_USER_CONTEXT_RULE).toMatch(/^user_context, when present, .* the ticket's title\.$/);
+      expect(prompt).toContain(PLAIN_USER_CONTEXT_RULE);
+      expect(prompt).toContain("source_seq always references a transcript line's seq.");
+      const tool = combinedAnalysisTool(occasion);
+      expect(tool.system_prompt).toBe(prompt);
+      const input = tool.input_schema as any;
+      expect(input.properties.user_context?.type).toBe("array");
+      expect(input.required).not.toContain("user_context");
     });
   }
 

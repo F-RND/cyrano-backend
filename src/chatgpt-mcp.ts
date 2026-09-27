@@ -1186,7 +1186,7 @@ const GET_CONTEXT_TOOL = {
 const ADD_NOTE_TOOL = {
   name: "cyrano_add_session_note",
   title: "Add a note to the live Cyrano session",
-  description: "File a note, reminder, decision, commitment, or follow-up into the conversation Cyrano is relaying right now. Use it whenever the user asks you to note, remember, capture, or remind them of something during a session — it lands in the session's Notes beside the ones they typed, tagged with your name, and is never spoken aloud. Notes attach to the live session automatically; there is no session id to supply. They can only be filed while the session is running: once it has ended the call is refused (cyrano_get_live_context reports `writable: false`), and the user would need to start a new session — tell them the note was not saved rather than retrying.",
+  description: "File a note, reminder, decision, commitment, follow-up, or study cue into the conversation Cyrano is relaying right now. Use it whenever the user asks you to note, remember, capture, or remind them of something during a session — it lands in the session's Notes beside the ones they typed, tagged with your name, and is never spoken aloud. Notes attach to the live session automatically; there is no session id to supply. They can only be filed while the session is running: once it has ended the call is refused (cyrano_get_live_context reports `writable: false`), and the user would need to start a new session — tell them the note was not saved rather than retrying.",
   inputSchema: {
     type: "object",
     properties: {
@@ -1198,8 +1198,8 @@ const ADD_NOTE_TOOL = {
       },
       kind: {
         type: "string",
-        enum: ["note", "reminder", "decision", "commitment", "follow_up"],
-        description: "What kind of thing this is. Defaults to \"note\".",
+        enum: ["note", "reminder", "decision", "commitment", "follow_up", "study_cue"],
+        description: "What kind of thing this is. Defaults to \"note\". \"study_cue\" is something the lecturer flagged for the exam or study guide — use in lecture sessions.",
       },
       owner: {
         type: "string",
