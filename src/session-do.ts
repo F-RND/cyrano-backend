@@ -1087,6 +1087,13 @@ export class SessionDO implements DurableObject {
       }),
     ]);
     await this.flushLlmSpend();
+    if (combined.failure) {
+      // The wire status collapses every non-auth failure into `llm_error`, so
+      // this is the only place the provider's status is ever recorded.
+      console.error(
+        `analysis pass "combined" failed (status=${combined.failure.status ?? "none"}, retryable=${isRetryableFailure(combined.failure)}): ${combined.failure.message}`,
+      );
+    }
 
     // A transiently failed pass (cold model, 429, timeout) means these segments
     // reached us but the model never spoke to them. Rather than consume the
