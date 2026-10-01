@@ -24,6 +24,7 @@ import {
   LlmCallError,
   OPENROUTER_BASE_URL,
   callTool,
+  isGlmModel,
   isReasoningBudgetModel,
   isRetryableStatus,
   resetFailoverLogThrottle,
@@ -1030,6 +1031,35 @@ describe("reasoning-model headroom on the OpenAI-compat wire", () => {
     const [, init] = fetchMock.mock.calls[1]! as unknown as [string, RequestInit];
     expect(JSON.parse(init.body as string).max_tokens).toBe(4096);
     expect(JSON.parse(init.body as string).reasoning_effort).toBe("low");
+  });
+
+  it("matches Z.ai GLM ids only", () => {
+    expect(isGlmModel("z-ai/glm-5.3-flash")).toBe(true);
+    expect(isGlmModel("z-ai/glm-5.3")).toBe(true);
+    expect(isGlmModel("glm-5.3")).toBe(true);
+    expect(isGlmModel("openai/gpt-oss-120b")).toBe(false);
+    expect(isGlmModel("gpt-5.6-luna")).toBe(false);
+    expect(isGlmModel("notglm-5")).toBe(false);
+  });
+
+  it("sends GLM minimal reasoning with headroom, and no reasoning_effort", async () => {
+    const body = await bodyOf({ ...openrouterPrimary, model: "z-ai/glm-5.3-flash" }, 2048);
+    expect(body.reasoning).toEqual({ effort: "minimal" });
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.max_tokens).toBe(4096);
+    expect(body.max_completion_tokens).toBeUndefined();
+  });
+
+  it("applies GLM minimal reasoning on the FALLBACK leg", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(creditExhausted())
+      .mockResolvedValueOnce(openAiCompatOk({ things: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await callTool({ ...primary, fallback: { ...fallbackLeg, model: "z-ai/glm-5.3-flash" } }, tool, {}, { maxTokens: 2048 });
+    const [, init] = fetchMock.mock.calls[1]! as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string).reasoning).toEqual({ effort: "minimal" });
   });
 
   it("I1: the hosted OpenAI-compat leg and a plain OpenAI-compat model are untouched", async () => {
