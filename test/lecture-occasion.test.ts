@@ -108,11 +108,17 @@ describe("occasionAfterFrame", () => {
     expect(occasionAfterFrame(meta, { session_id: "sess-b", occasion: "lecture.teaching" })).toBeNull();
   });
 
-  it("switches back to a conversation on request or on junk — it is not a one-way valve", () => {
+  it("switches back to a conversation on request or on an unknown name — it is not a one-way valve", () => {
     const lecture = { session_id: "sess-a", occasion: "lecture.listening" as const };
     expect(occasionAfterFrame(lecture, { session_id: "sess-a", occasion: "conversation" })).toBe("conversation");
     expect(occasionAfterFrame(lecture, { session_id: "sess-a", occasion: "lecture.napping" })).toBe("conversation");
-    expect(occasionAfterFrame(lecture, { session_id: "sess-a", occasion: undefined })).toBe("conversation");
+  });
+
+  it("ignores a frame with no string occasion, so a malformed one can't downgrade a live lecture", () => {
+    const lecture = { session_id: "sess-a", occasion: "lecture.teaching" as const };
+    for (const occasion of [undefined, null, 42, true, {}, ["lecture.teaching"]]) {
+      expect(occasionAfterFrame(lecture, { session_id: "sess-a", occasion })).toBeNull();
+    }
   });
 
   it("has nothing to write when the occasion doesn't change, including on a meta stored before occasions", () => {

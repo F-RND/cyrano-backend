@@ -354,13 +354,17 @@ export function retentionAfterFrame(
  * frame naming a different session is ignored rather than applied to a
  * session it wasn't aimed at — but not one-way: the occasion is not a privacy
  * control, so a switch back to "conversation" is as valid as one away from
- * it. Sanitized like the hello field, so an unknown value reads as
- * "conversation". */
+ * it. A frame with no string occasion is malformed, not a request, and is
+ * ignored: it must not quietly turn a live lecture into a conversation. A
+ * string this server doesn't know (a newer client's occasion) is sanitized
+ * like the hello field and reads as "conversation", so switching to it lands
+ * where starting with it would. */
 export function occasionAfterFrame(
   meta: { session_id: string; occasion?: SessionOccasionWire },
   frame: { session_id: string; occasion: unknown },
 ): SessionOccasionWire | null {
   if (frame.session_id !== meta.session_id) return null;
+  if (typeof frame.occasion !== "string") return null;
   const occasion = sanitizeOccasion(frame.occasion);
   return occasion === (meta.occasion ?? "conversation") ? null : occasion;
 }
@@ -1083,6 +1087,13 @@ export class SessionDO implements DurableObject {
       }),
     ]);
     await this.flushLlmSpend();
+    if (combined.failure) {
+      // The wire status collapses every non-auth failure into `llm_error`, so
+      // this is the only place the provider's status is ever recorded.
+      console.error(
+        `analysis pass "combined" failed (status=${combined.failure.status ?? "none"}, retryable=${isRetryableFailure(combined.failure)}): ${combined.failure.message}`,
+      );
+    }
 
     // A transiently failed pass (cold model, 429, timeout) means these segments
     // reached us but the model never spoke to them. Rather than consume the
