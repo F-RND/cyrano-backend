@@ -699,7 +699,8 @@ describe("Tag tools over origin-pull", () => {
     expect(await callTool(none.env, "cyrano_list_tags")).toEqual({
       ok: false,
       reason: "device_unreachable",
-      detail: expect.stringContaining("so their tag list could not be fetched"),
+      // No index at all is the switch being off, not a sleeping Mac.
+      detail: expect.stringContaining('switch on "Past sessions"'),
       account: ACCOUNT,
     });
     // Too many reads in flight is not "offline": no fallback, no index read.
@@ -789,6 +790,10 @@ describe("Tag tools over origin-pull", () => {
     const result = await callTool(noIndex.env, "cyrano_tag_context", { tag: "BIO 201" });
     expect(result).toMatchObject({ reason: "device_unreachable", sessions: [] });
     expect(result.detail).toMatch(/No session index has been published/);
+    // No index is a setup state: name the switch, and do not send the user to
+    // wake a Mac that is awake.
+    expect(result.detail).toMatch(/switch on "Past sessions"/);
+    expect(result.detail).not.toMatch(/wake their Mac/);
     expect(result).not.toHaveProperty("built_at");
   });
 
@@ -866,6 +871,20 @@ describe("Tag tools over origin-pull", () => {
     const noIndex = fakeEnv({});
     expect((await callTool(noIndex.env, "cyrano_list_sessions", { tag: "BIO 201" })).notice)
       .toMatch(/No session index has been published/);
+    // The fix names the switch and rules out the scope picker the old
+    // wording sent people to.
+    const bare = (await callTool(noIndex.env, "cyrano_list_sessions", {})).notice;
+    expect(bare).toMatch(/switch on "Past sessions"/);
+    expect(bare).toMatch(/"What they can see" choice on the same page does not/);
+
+    // Switching Past sessions off clears the list and drops the connection:
+    // an empty index from an offline device has to offer that as a cause.
+    const retracted = fakeEnv({ index: { ...INDEX, sessions: [] }, origin: offline });
+    expect((await callTool(retracted.env, "cyrano_list_sessions", {})).notice)
+      .toMatch(/"Past sessions" was switched off/);
+    const tagless = await callTool(fakeEnv({ origin: offline }).env, "cyrano_list_tags", {});
+    expect(tagless).toMatchObject({ ok: false, reason: "device_unreachable" });
+    expect(tagless.detail).toMatch(/switch on "Past sessions"/);
 
     expect(listSessionsTool.inputSchema.properties.tag.type).toBe("string");
     expect(listSessionsTool.inputSchema.properties.tag.description).toMatch(/cyrano_list_tags/);

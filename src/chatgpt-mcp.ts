@@ -666,6 +666,24 @@ async function readIndex(
   return { index: payload?.index ?? null, deviceOnline: payload?.device_online === true };
 }
 
+/**
+ * What to tell the user when NO index exists for the account. The old wording
+ * pointed at "past-session sharing (Settings, Connections, MCP assistants)",
+ * which a user reads as the sharing-scope choice on that page — and a user
+ * with the scope at its widest and the actual switch off was sent in a circle
+ * (2026-09-30). Name the switch, say where it is, and say what it is NOT. A
+ * sleeping Mac is deliberately ruled out: it leaves its last list behind, so
+ * "no index at all" is a setup state, not a power state.
+ */
+const NO_INDEX_FIX =
+  "This is a setup state, not a sleeping Mac: a Mac that is asleep leaves its last list behind. Ask the user to open Cyrano on their Mac, go to Settings, Connections, MCP assistants, and switch on \"Past sessions\" in the \"In a browser or on your phone\" section (in app versions that predate that section, open the assistant's own setup page from the same screen and switch on \"Let ... read past sessions\"). The \"What they can see\" choice on the same page does not do this by itself. Cyrano on an iPhone alone has no such switch; from a phone only finished sessions the user chose to share appear here.";
+
+/** An index that exists but is empty, from a device that is not connected, is
+ * what turning the Past sessions switch OFF leaves behind (the app clears the
+ * list on its way out). */
+const RETRACTED_INDEX_CAUSE =
+  " A fourth cause fits here because the device is not connected: \"Past sessions\" was switched off on the Mac (Settings, Connections, MCP assistants, under \"In a browser or on your phone\", or on the assistant's own setup page in older app versions), which clears this list.";
+
 function indexRows(index: PublishedIndex | null): unknown[] {
   return Array.isArray(index?.sessions) ? index.sessions : [];
 }
@@ -777,8 +795,8 @@ async function listSessions(
           notice: tag && rows.length > 0
             ? `No session in the index carries the tag "${tag}". cyrano_list_tags lists the tags that do; this says nothing about how many sessions the user has.`
             : index
-              ? "The device published an index with no sessions in it. That has three possible causes with different fixes: nothing is kept, the user's sharing scope excludes everything, or — on the free plan — their recent sessions are still inside the 45-minute wait after a session's last audio, which Cyrano Pro removes. Relay that rather than concluding they have never used Cyrano."
-              : "No session index has been published for this account. The user's device has not connected with past-session sharing switched on (Settings, Connections, MCP assistants).",
+              ? `The device published an index with no sessions in it. That has three possible causes with different fixes: nothing is kept, the user's sharing scope excludes everything, or — on the free plan — their recent sessions are still inside the 45-minute wait after a session's last audio, which Cyrano Pro removes.${deviceOnline ? "" : RETRACTED_INDEX_CAUSE} Relay that rather than concluding they have never used Cyrano.`
+              : `No session index has been published for this account. ${NO_INDEX_FIX}`,
         }
       : {}),
     account: accountEcho(identity, connectionLabel),
@@ -990,7 +1008,11 @@ async function listTags(
     return {
       ok: false,
       reason: read.reason,
-      detail: read.detail,
+      // "Asleep or offline, wake it" is the wrong advice when nothing was ever
+      // published: say what is actually missing.
+      detail: read.reason === "device_unreachable"
+        ? `The user's tag list could not be fetched, and no session index has been published for this account. ${NO_INDEX_FIX}`
+        : read.detail,
       account: accountEcho(identity, connectionLabel),
     };
   }
@@ -1034,7 +1056,11 @@ function tagContextFallbackDetail(
     ? `The rollup for "${tag}" is built on the user's Mac when you ask, and the Mac is asleep or offline. Cyrano's servers don't keep the sessions' contents.`
     : `The rollup for "${tag}" is built on the user's Mac when you ask, and the Mac is connected but did not answer in time. Try once more before falling back.`;
   if (!hasIndex) {
-    return `${why} No session index has been published for this account either, so there is no list of tagged sessions to fall back on. Ask the user to wake their Mac and try again.`;
+    // Unreachable with no index is the switch being off, not a sleeping Mac.
+    // A Mac that timed out is connected, so there the old advice still holds.
+    return reason === "device_unreachable"
+      ? `${why} No session index has been published for this account either, so there is no list of tagged sessions to fall back on. ${NO_INDEX_FIX}`
+      : `${why} No session index has been published for this account either, so there is no list of tagged sessions to fall back on.`;
   }
   if (listed === 0) {
     return `${why} No session in the index the Mac last published carries this tag; cyrano_list_tags lists the tags that do.`;
