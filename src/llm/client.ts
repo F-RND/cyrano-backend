@@ -362,6 +362,17 @@ export function isReasoningBudgetModel(model: string): boolean {
 const GPT_OSS_REASONING_EFFORT = "low";
 
 /**
+ * Z.ai GLM on OpenRouter. Reasoning is mandatory there (`enabled: false` is a
+ * 400), and at the default effort GLM-5.3 spent the whole 2048-token cap
+ * thinking and returned an empty tool call (~27 s a call). Measured
+ * 2026-09-30 through runCombinedAnalysis at `effort: "minimal"`: 10/10 ok,
+ * median 3.3 s (4 lines) / 4.6 s (60 lines), ~300-400 output tokens.
+ */
+export function isGlmModel(model: string): boolean {
+  return /(^|\/)glm-/.test(model);
+}
+
+/**
  * Whether a failure is worth coming back for. Sole home of the policy;
  * session-do's `isRetryableFailure` delegates here so the retry rule and the
  * both-legs-down error below cannot drift apart.
@@ -732,6 +743,9 @@ async function callToolOpenAICompat<TOutput>(
     // the structured result is not starved. The caller's larger cap still wins.
     body.max_tokens = Math.max(maxOut, REASONING_HEADROOM_TOKENS);
     body.reasoning_effort = GPT_OSS_REASONING_EFFORT;
+  } else if (isGlmModel(config.model)) {
+    body.max_tokens = Math.max(maxOut, REASONING_HEADROOM_TOKENS);
+    body.reasoning = { effort: "minimal" };
   } else {
     body.max_tokens = maxOut;
   }

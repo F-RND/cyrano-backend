@@ -168,7 +168,8 @@ const OPENROUTER_LISTINGS: Record<string, OpenRouterListing> = {
   "z-ai/glm-4.6": { inputPerM: 0.43, outputPerM: 1.75, cacheReadPerM: 0.08 },
   "z-ai/glm-4.7": { inputPerM: 0.4, outputPerM: 1.75, cacheReadPerM: 0.08 },
   "z-ai/glm-4.7-flash": { inputPerM: 0.0605, outputPerM: 0.4 },
-  "z-ai/glm-5.3-flash": { inputPerM: 0.09, outputPerM: 0.3, cacheReadPerM: 0.018 },
+  // Re-read 2026-09-30 (was 0.09 / 0.3 / 0.018); matches the `cost` OpenRouter returns per call.
+  "z-ai/glm-5.3-flash": { inputPerM: 0.15, outputPerM: 0.5, cacheReadPerM: 0.03 },
   // --- Qwen3 ~27–35B ---
   "qwen/qwen3-32b": { inputPerM: 0.08, outputPerM: 0.28 },
   "qwen/qwen3-30b-a3b": { inputPerM: 0.12, outputPerM: 0.5 },
