@@ -108,14 +108,20 @@ export function parseAgentContextQuery(params: URLSearchParams): AgentContextQue
  * assistant produced summaries that attributed a colleague's words to a
  * machine. The name of that colleague is on-device (invariant #4) and stays
  * there; the slot number is the strongest identity the wire is allowed to
- * carry, so the label names the slot instead.
+ * carry, so the label names the slot instead. The same holds for an in-room
+ * OTHER voice the app has clustered: it carries a slot from the same
+ * per-session namespace, so the label names it too.
  */
 export function speakerLabel(segment: Pick<TranscriptSegment, "speaker" | "speaker_slot">): string {
   switch (segment.speaker as Speaker) {
     case "USER":
       return "You";
     case "OTHER":
-      return "Other person (in the room)";
+      // An in-room voice the app clustered carries a slot from the same
+      // per-session namespace as call voices, so "Speaker 3" is one person.
+      return segment.speaker_slot !== undefined
+        ? `Speaker ${segment.speaker_slot} (in the room)`
+        : "Other person (in the room)";
     case "SYSTEM":
       return segment.speaker_slot !== undefined
         ? `Speaker ${segment.speaker_slot} (on the call)`

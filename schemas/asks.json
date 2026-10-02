@@ -14,7 +14,7 @@
             "seq": { "type": "integer" },
             "speaker": { "type": "string", "enum": ["USER", "OTHER", "UNKNOWN", "SYSTEM"] },
             "text": { "type": "string" },
-            "speaker_slot": { "type": "integer", "description": "Which distinct SYSTEM-feed voice said this line (2, 3, \u2026). Absent on mic lines." }
+            "speaker_slot": { "type": "integer", "description": "Which distinct voice said this OTHER (in-room) or SYSTEM (call) line (2, 3, \u2026); refer to it as \"Speaker N\". Absent on USER/UNKNOWN lines and unclustered mic lines." }
           },
           "required": ["seq", "speaker", "text"]
         }

@@ -106,6 +106,25 @@ function ownerForCommitment(
   return speaker === "USER" ? "USER" : speaker === "SYSTEM" ? "SYSTEM" : "OTHER";
 }
 
+/**
+ * The diarized slot (2, 3, …) of the source line, for slot-level attribution
+ * (`owner_slot`/`requested_by_slot`). A slot names WHICH counterpart voice it
+ * was — on the call (SYSTEM) or in the room (OTHER); slots share one namespace
+ * per session, so slot 3 is the same voice on either. Keyed on the source
+ * line's ACTUAL speaker, not the resolved owner: a USER or UNKNOWN line never
+ * legitimately carries a slot, so a stray one is ignored (UNKNOWN resolves to
+ * an OTHER owner but must not borrow a slot). Re-derived here, never trusted
+ * from the model. No speaker map (legacy callers) → no slot.
+ */
+function slotForSource(
+  speakerBySeq: Map<number, Speaker> | undefined,
+  slotBySeq: Map<number, number> | undefined,
+  source_seq: number,
+): number | undefined {
+  const speaker = speakerBySeq?.get(source_seq);
+  return speaker === "OTHER" || speaker === "SYSTEM" ? slotBySeq?.get(source_seq) : undefined;
+}
+
 export function validCommitments(
   items: unknown,
   speakerBySeq?: Map<number, Speaker>,
@@ -120,11 +139,12 @@ export function validCommitments(
     // speaker map is supplied at all (legacy callers), keep the old "ours"
     // default so nothing silently reattributes.
     const owner = ownerForCommitment(speakerBySeq, source_seq);
-    // Slot-level attribution rides ONLY on a SYSTEM owner: a meeting feed can
-    // carry several voices, and this names which one so the client can show
-    // "Speaker 5" instead of a flat "SYSTEM". Re-derived from the source line
-    // here, never trusted from the model, exactly like `owner`.
-    const owner_slot = owner === "SYSTEM" ? slotBySeq?.get(source_seq) : undefined;
+    // Slot-level attribution rides ONLY on a counterpart (OTHER/SYSTEM) owner:
+    // a call or a room can hold several voices, and this names which one so the
+    // client can show "Speaker 5" instead of a flat "SYSTEM"/"OTHER".
+    // Re-derived from the source line here, never trusted from the model,
+    // exactly like `owner`.
+    const owner_slot = slotForSource(speakerBySeq, slotBySeq, source_seq);
     // Test-only attribution trace. It contains extracted user text, so the
     // caller must opt in through TRANSCRIPT_CONTENT_LOGGING; the default is
     // deliberately fail-closed even when Worker observability is enabled.
@@ -158,9 +178,10 @@ export function validAsks(
     // Attribute the ask to SYSTEM only when its source line actually came from
     // captured system-output audio; otherwise it's the in-room counterpart.
     const requested_by = speakerBySeq?.get(source_seq) === "SYSTEM" ? "SYSTEM" : "OTHER";
-    // Slot only for a SYSTEM ask, same rule as owner_slot: name which feed
-    // voice asked, so the client can say "Speaker 3 asked…" not "SYSTEM asked".
-    const requested_by_slot = requested_by === "SYSTEM" ? slotBySeq?.get(source_seq) : undefined;
+    // Slot for an OTHER or SYSTEM source line, same rule as owner_slot: name
+    // which voice asked, so the client can say "Speaker 3 asked…" not "SYSTEM
+    // asked" (or "someone in the room asked").
+    const requested_by_slot = slotForSource(speakerBySeq, slotBySeq, source_seq);
     return {
       text: raw.text,
       requested_by,
@@ -212,7 +233,7 @@ export function validDecisions(
   return validItems(decisionSchema, items, "decisions", (raw) => {
     const source_seq = normalizeSeq(raw.source_seq);
     const owner = ownerForCommitment(speakerBySeq, source_seq);
-    const owner_slot = owner === "SYSTEM" ? slotBySeq?.get(source_seq) : undefined;
+    const owner_slot = slotForSource(speakerBySeq, slotBySeq, source_seq);
     return {
       text: raw.text,
       owner,

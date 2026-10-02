@@ -29,7 +29,7 @@ export interface ReanalyzeLine {
   seq: number;
   speaker: Speaker;
   text: string;
-  /** Diarized SYSTEM-feed voice (2, 3, …) when the stored segment had one —
+  /** Diarized OTHER/SYSTEM voice (2, 3, …) when the stored segment had one —
    * carried through so reanalysis attributes to "Speaker N" like live does. */
   speaker_slot?: number;
 }
