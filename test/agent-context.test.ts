@@ -128,6 +128,13 @@ describe("speaker attribution", () => {
     expect(speakerLabel({ speaker: "UNKNOWN" })).toBe("Unattributed");
   });
 
+  it("names a clustered in-room voice by its slot, and leaves an unslotted one as before", () => {
+    expect(speakerLabel({ speaker: "OTHER", speaker_slot: 3 })).toBe("Speaker 3 (in the room)");
+    expect(speakerLabel({ speaker: "OTHER" })).toBe("Other person (in the room)");
+    // Same slot namespace: slot 3 on the call is the same number, different place.
+    expect(speakerLabel({ speaker: "SYSTEM", speaker_slot: 3 })).toBe("Speaker 3 (on the call)");
+  });
+
   it("renames diarization confidence so it can't be read as ASR certainty", () => {
     const line = projectSegment(segment(1, "for you to have a stock of syrup", { confidence: 1 }));
     expect(line.diarization_confidence).toBe(1);

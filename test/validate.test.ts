@@ -126,27 +126,97 @@ describe("analysis output validation", () => {
     expect("owner_slot" in out[2]!).toBe(false);
   });
 
-  it("attaches requested_by_slot only to a SYSTEM ask whose source line carried a slot", () => {
+  it("attaches requested_by_slot to an OTHER or SYSTEM ask whose source line carried a slot", () => {
     const speakerBySeq = new Map<number, "USER" | "OTHER" | "SYSTEM" | "UNKNOWN">([
       [1, "SYSTEM"],
       [2, "OTHER"],
+      [3, "OTHER"],
+      [4, "UNKNOWN"],
+      [5, "USER"],
     ]);
+    // Seq 3 is an unclustered in-room line; seqs 4 and 5 carry stray slots a
+    // USER/UNKNOWN line never legitimately has, which must be ignored.
     const slotBySeq = new Map<number, number>([
       [1, 3],
       [2, 7],
+      [4, 8],
+      [5, 9],
     ]);
     const out = validAsks(
       [
         { text: "Can you confirm the date?", source_seq: 1 },
         { text: "Do you have a hard stop?", source_seq: 2 },
+        { text: "Can you send the link?", source_seq: 3 },
+        { text: "Could you check the budget?", source_seq: 4 },
+        { text: "Can you take notes?", source_seq: 5 },
       ],
       speakerBySeq,
       slotBySeq,
     );
-    expect(out.map((a) => a.requested_by)).toEqual(["SYSTEM", "OTHER"]);
-    // Slot only on the SYSTEM ask; the in-room OTHER ask stays slot-less even
-    // though seq 2 had a slot in the map.
-    expect(out.map((a) => a.requested_by_slot)).toEqual([3, undefined]);
+    expect(out.map((a) => a.requested_by)).toEqual(["SYSTEM", "OTHER", "OTHER", "OTHER", "OTHER"]);
+    // An in-room voice the app clustered ("Speaker 7, in the room") is named
+    // exactly like a call voice; the unslotted, UNKNOWN and USER lines stay
+    // slot-less with the key truly absent.
+    expect(out.map((a) => a.requested_by_slot)).toEqual([3, 7, undefined, undefined, undefined]);
+    for (const a of out.slice(2)) expect("requested_by_slot" in a).toBe(false);
+  });
+
+  it("attaches owner_slot to an OTHER (in-room) commitment and decision whose line carried a slot", () => {
+    const speakerBySeq = new Map<number, "USER" | "OTHER" | "SYSTEM" | "UNKNOWN">([
+      [1, "OTHER"],
+      [2, "OTHER"],
+      [3, "UNKNOWN"],
+    ]);
+    // Slot 3 is one voice whether on the call or in the room; here it is in
+    // the room. Seq 3's stray slot rides an UNKNOWN line, which resolves to an
+    // OTHER owner but must not borrow the slot.
+    const slotBySeq = new Map<number, number>([
+      [1, 3],
+      [3, 4],
+    ]);
+    const commitments = validCommitments(
+      [
+        { text: "Speaker 3 will book the room", source_seq: 1 },
+        { text: "Someone will follow up", source_seq: 2 },
+        { text: "Unclear voice will check", source_seq: 3 },
+      ],
+      speakerBySeq,
+      slotBySeq,
+    );
+    expect(commitments.map((c) => c.owner)).toEqual(["OTHER", "OTHER", "OTHER"]);
+    expect(commitments[0]!.owner_slot).toBe(3);
+    expect("owner_slot" in commitments[1]!).toBe(false);
+    expect("owner_slot" in commitments[2]!).toBe(false);
+
+    const [decision] = validDecisions(
+      [{ text: "Speaker 3 owns the venue", source_seq: 1 }],
+      speakerBySeq,
+      slotBySeq,
+    );
+    expect(decision!.owner).toBe("OTHER");
+    expect(decision!.owner_slot).toBe(3);
+  });
+
+  it("never attaches a slot to a USER-sourced commitment, decision or ask, even with a stray slot", () => {
+    const speakerBySeq = new Map<number, "USER" | "OTHER" | "SYSTEM" | "UNKNOWN">([[1, "USER"]]);
+    const slotBySeq = new Map<number, number>([[1, 6]]);
+    const [c] = validCommitments([{ text: "I'll send the deck", source_seq: 1 }], speakerBySeq, slotBySeq);
+    expect(c!.owner).toBe("USER");
+    expect("owner_slot" in c!).toBe(false);
+    const [d] = validDecisions([{ text: "I own the rollout", source_seq: 1 }], speakerBySeq, slotBySeq);
+    expect("owner_slot" in d!).toBe(false);
+    const [a] = validAsks([{ text: "Can you review?", source_seq: 1 }], speakerBySeq, slotBySeq);
+    expect("requested_by_slot" in a!).toBe(false);
+  });
+
+  it("emits no slot fields when no speaker map is supplied, even with a slot map (legacy callers)", () => {
+    const slotBySeq = new Map<number, number>([[1, 4]]);
+    const [c] = validCommitments([{ text: "Will follow up", source_seq: 1 }], undefined, slotBySeq);
+    expect(c!.owner).toBe("USER");
+    expect("owner_slot" in c!).toBe(false);
+    const [a] = validAsks([{ text: "Can you review?", source_seq: 1 }], undefined, slotBySeq);
+    expect(a!.requested_by).toBe("OTHER");
+    expect("requested_by_slot" in a!).toBe(false);
   });
 
   it("emits no slot fields when no slot map is supplied (old callers)", () => {

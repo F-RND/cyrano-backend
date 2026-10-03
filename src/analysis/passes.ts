@@ -22,7 +22,7 @@ import type {
 } from "../types.js";
 
 /** The two seq→attribute maps validation attributes ownership by: speaker (for
- * `owner`/`requested_by`) and, for slotted SYSTEM lines, the diarized slot (for
+ * `owner`/`requested_by`) and, for slotted OTHER/SYSTEM lines, the diarized slot (for
  * `owner_slot`/`requested_by_slot`). Built once per window and threaded into
  * validCommitments/validAsks. Only lines that actually carry a `speaker_slot`
  * land in slotBySeq, so a mic-only window produces an empty slot map and the
@@ -44,7 +44,7 @@ interface TranscriptLine {
   seq: number;
   speaker: TranscriptSegment["speaker"];
   text: string;
-  /** Which distinct SYSTEM voice said this line (2, 3, …) — see types.ts.
+  /** Which distinct OTHER/SYSTEM voice said this line (2, 3, …) — see types.ts.
    * Omitted (not null) when absent, so mic-only sessions serialize
    * byte-identically to the pre-slot format. */
   speaker_slot?: number;
@@ -100,7 +100,7 @@ export async function runCommitments(
     { maxTokens: SINGLE_PASS_MAX_OUTPUT_TOKENS },
   );
   // Attribute each commitment to its committer by the source line's speaker
-  // (and slot, for a specific feed voice).
+  // (and slot, for a specific call or in-room voice).
   const { speakerBySeq, slotBySeq } = attributionMaps(window);
   return validCommitments(result.commitments, speakerBySeq, slotBySeq, config.logContent === true);
 }

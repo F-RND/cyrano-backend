@@ -25,11 +25,15 @@ export interface TranscriptSegment {
   text: string;
   final: boolean;
   /**
-   * Ephemeral speaker slot within the SYSTEM feed: 2, 3, ... for distinct
-   * remote voices on a call (the user is always "You"; slot 1 is conceptual).
-   * Orthogonal to `speaker` — the segment stays "SYSTEM" and this only
-   * disambiguates which remote voice it was. Optional: absent from mic
-   * segments and from clients that predate the feature. Derived on-device
+   * Ephemeral speaker slot: 2, 3, ... for distinct counterpart voices (the
+   * user is always "You"; slot 1 is conceptual). Carried on SYSTEM lines (a
+   * voice on a captured call) and on OTHER lines (a voice the app clustered in
+   * the room); the numbers share one namespace per session, so slot 3 is one
+   * voice whether it is on the call or in the room. Orthogonal to `speaker` —
+   * the segment stays "SYSTEM"/"OTHER" and this only disambiguates which voice
+   * it was. Never on USER or UNKNOWN lines (ignored for attribution if one
+   * arrives). Optional: absent from unclustered mic segments and from clients
+   * that predate the feature. Derived on-device
    * from an in-memory-only embedding that is never persisted or transmitted —
    * only this integer label crosses the wire. See invariant #4 in README.md.
    */
@@ -465,12 +469,12 @@ export interface CommitmentExtraction {
   // the counterpart made — tracked so the client can toggle mine vs all.
   owner: "USER" | "OTHER" | "SYSTEM";
   /**
-   * Which distinct SYSTEM-feed voice made this commitment (2, 3, …), set only
-   * when `owner` resolved to SYSTEM and the source line carried a
-   * `speaker_slot`. Also re-derived server-side from the source line, never
-   * trusted from the model. Absent for USER/OTHER commitments and for
-   * un-slotted feed lines. Lets a client attribute a task to "Speaker 5"
-   * instead of a flat "SYSTEM" — the integer slot is all that ever crosses the
+   * Which distinct counterpart voice made this commitment (2, 3, …), set only
+   * when the source line is OTHER or SYSTEM and carried a `speaker_slot`.
+   * Also re-derived server-side from the source line, never trusted from the
+   * model. Absent for USER commitments and for un-slotted lines. Lets a client
+   * attribute a task to "Speaker 5" instead of a flat "SYSTEM"/"OTHER" — the
+   * integer slot is all that ever crosses the
    * wire; the app maps it to a local name (README invariant #4). Optional and
    * additive, so old clients/backends interop.
    */
@@ -485,8 +489,8 @@ export interface AskExtraction {
   // The counterpart who made the ask: "OTHER" for an in-room mic speaker,
   // "SYSTEM" when the source line came from captured system-output audio.
   requested_by: "OTHER" | "SYSTEM";
-  /** Which distinct SYSTEM-feed voice made the ask (2, 3, …), set only when
-   * `requested_by` is SYSTEM and the source line carried a `speaker_slot`.
+  /** Which distinct counterpart voice made the ask (2, 3, …), set only when
+   * the source line is OTHER or SYSTEM and carried a `speaker_slot`.
    * Re-derived server-side, never trusted from the model; absent otherwise.
    * Same slot-not-name rule as `CommitmentExtraction.owner_slot`. */
   requested_by_slot?: number;
@@ -518,7 +522,7 @@ export interface NextMoveSuggestion {
  * capturing these lets Next Moves shrink to genuinely open items instead of
  * restating settled ones. Owner is who the decision makes accountable (derived
  * server-side from the source line like a commitment, with owner_slot naming a
- * specific feed voice); status separates a firm agreement from a leaning one.
+ * specific call or in-room voice); status separates a firm agreement from a leaning one.
  */
 export interface DecisionExtraction {
   text: string;

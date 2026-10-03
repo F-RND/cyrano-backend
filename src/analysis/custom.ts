@@ -94,7 +94,7 @@ export const USER_CONTEXT_PROMPT =
 
 function buildSystemPrompt(defs: CustomCategoryDefinition[], detect: boolean): string {
   const parts: string[] = [
-    "You read a short window of a diarized conversation transcript (USER / OTHER / UNKNOWN / SYSTEM lines, each with a seq number). A SYSTEM line may carry `speaker_slot` (2, 3, …) identifying WHICH distinct meeting-feed voice said it — refer to that voice as \"Speaker 2\" etc., never as an undifferentiated SYSTEM, and never attribute one slot's words to another.",
+    "You read a short window of a diarized conversation transcript (USER / OTHER / UNKNOWN / SYSTEM lines, each with a seq number). An OTHER (in-room) or SYSTEM (call) line may carry `speaker_slot` (2, 3, …) identifying WHICH distinct voice said it (one slot is one person, in the room or on the call) — refer to that voice as \"Speaker 2\" etc., never as an undifferentiated SYSTEM or OTHER, and never attribute one slot's words to another.",
     USER_CONTEXT_PROMPT,
   ];
 
@@ -206,7 +206,7 @@ export function buildCustomCategoriesTool(
               speaker_slot: {
                 type: "integer",
                 description:
-                  "Which distinct SYSTEM voice said this line (2, 3, …). Absent on mic lines and on feeds without diarization.",
+                  "Which distinct voice said this OTHER (in-room) or SYSTEM (call) line (2, 3, …). Absent on USER/UNKNOWN lines and on lines without diarization.",
               },
             },
             required: ["seq", "speaker", "text"],

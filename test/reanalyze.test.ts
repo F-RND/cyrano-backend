@@ -72,6 +72,16 @@ describe("sanitizeReanalyzeLines", () => {
     expect(lines[2]!.speaker_slot).toBeUndefined();
     expect("speaker_slot" in lines[3]!).toBe(false);
   });
+
+  it("keeps a speaker_slot on an OTHER (in-room) line, not only on SYSTEM", () => {
+    const lines = sanitizeReanalyzeLines([
+      { seq: 1, speaker: "OTHER", text: "I'll book the room", speaker_slot: 3 },
+      { seq: 2, speaker: "OTHER", text: "great" },
+    ])!;
+    expect(lines[0]!.speaker).toBe("OTHER");
+    expect(lines[0]!.speaker_slot).toBe(3);
+    expect("speaker_slot" in lines[1]!).toBe(false);
+  });
 });
 
 describe("reanalyzeTranscript", () => {

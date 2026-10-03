@@ -15,7 +15,7 @@
             "seq": { "type": "integer" },
             "speaker": { "type": "string", "enum": ["USER", "OTHER", "UNKNOWN", "SYSTEM"] },
             "text": { "type": "string" },
-            "speaker_slot": { "type": "integer", "description": "Which distinct SYSTEM-feed voice said this line (2, 3, …). Absent on mic lines." }
+            "speaker_slot": { "type": "integer", "description": "Which distinct voice said this OTHER (in-room) or SYSTEM (call) line (2, 3, …); refer to it as \"Speaker N\". Absent on USER/UNKNOWN lines and unclustered mic lines." }
           },
           "required": ["seq", "speaker", "text"]
         }
@@ -47,7 +47,7 @@
           "type": "object",
           "properties": {
             "text": { "type": "string", "description": "The commitment, restated concisely in third person, e.g. \"Send the deck to Priya\"." },
-            "owner": { "type": "string", "enum": ["USER", "OTHER", "SYSTEM"], "description": "Who made the commitment. The server re-derives this — and a numeric owner_slot naming the specific SYSTEM-feed voice — from source_seq's speaker, so a best-effort value here is fine and owner_slot is never sent by you." },
+            "owner": { "type": "string", "enum": ["USER", "OTHER", "SYSTEM"], "description": "Who made the commitment. The server re-derives this — and a numeric owner_slot naming the specific OTHER or SYSTEM voice — from source_seq's speaker, so a best-effort value here is fine and owner_slot is never sent by you." },
             "inferred_deadline": { "type": ["string", "null"], "description": "ISO date, or null if no deadline was implied." },
             "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
             "source_seq": { "type": "integer", "description": "seq of the line where the commitment was made (the committer's line)." }
