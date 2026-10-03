@@ -100,7 +100,7 @@ export async function runCommitments(
     { maxTokens: SINGLE_PASS_MAX_OUTPUT_TOKENS },
   );
   // Attribute each commitment to its committer by the source line's speaker
-  // (and slot, for a specific feed voice).
+  // (and slot, for a specific call or in-room voice).
   const { speakerBySeq, slotBySeq } = attributionMaps(window);
   return validCommitments(result.commitments, speakerBySeq, slotBySeq, config.logContent === true);
 }
