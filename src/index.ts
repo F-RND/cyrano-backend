@@ -18,7 +18,7 @@ import {
   reanalyzeTranscript,
   sanitizeReanalyzeLines,
 } from "./analysis/reanalyze.js";
-import { generateDictationPolish, sanitizeModes } from "./analysis/dictation-polish.js";
+import { generateDictationPolish, sanitizeHints, sanitizeModes } from "./analysis/dictation-polish.js";
 import {
   answerQuestion,
   MAX_ASK_CONTEXT_BYTES,
@@ -549,10 +549,12 @@ export default {
       const body = (await request.json().catch(() => ({}))) as {
         text?: string;
         modes?: unknown;
+        hints?: unknown;
         llm_api_key?: string;
       };
       const text = typeof body.text === "string" ? body.text : "";
       const modes = sanitizeModes(body.modes);
+      const hints = sanitizeHints(body.hints);
       if (text.trim().length === 0) {
         return Response.json({ polished_text: "" });
       }
@@ -566,6 +568,7 @@ export default {
         resolveStatelessLlmConfig(env, body.llm_api_key, ledger),
         text,
         modes,
+        hints,
       );
       await reportSpend(env, identity, ledger.take(), "/dictation/polish");
       return Response.json({ polished_text: polished });

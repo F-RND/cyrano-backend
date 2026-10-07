@@ -10,7 +10,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   generateDictationPolish,
+  sanitizeHints,
   sanitizeModes,
+  MAX_POLISH_HINTS,
   MAX_POLISH_INPUT_CHARS,
 } from "../src/analysis/dictation-polish.js";
 
@@ -41,7 +43,45 @@ describe("sanitizeModes", () => {
   });
 });
 
+describe("sanitizeHints", () => {
+  it("keeps trimmed non-empty strings, in order", () => {
+    expect(sanitizeHints(["  a  ", "", 3, null, "b"])).toEqual(["a", "b"]);
+  });
+  it("returns [] for non-arrays", () => {
+    expect(sanitizeHints(undefined)).toEqual([]);
+    expect(sanitizeHints("hint")).toEqual([]);
+  });
+  it("caps the count and clamps each hint", () => {
+    const many = Array.from({ length: MAX_POLISH_HINTS + 4 }, (_, i) => `hint ${i}`);
+    expect(sanitizeHints(many)).toHaveLength(MAX_POLISH_HINTS);
+    expect(sanitizeHints(["x".repeat(5000)])[0]!.length).toBeLessThanOrEqual(400);
+  });
+});
+
 describe("generateDictationPolish", () => {
+  /** The tool input exactly as the model receives it: the user turn. */
+  function sentInput(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    const [, init] = fetchMock.mock.calls[0]! as unknown as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { messages: { role: string; content: string }[] };
+    const user = body.messages.find((m) => m.role === "user")!;
+    return JSON.parse(user.content) as Record<string, unknown>;
+  }
+
+  it("forwards hints to the model when there are some", async () => {
+    const fetchMock = vi.fn(async () => toolResponse({ polished_text: "Send it to Alex." }));
+    vi.stubGlobal("fetch", fetchMock);
+    const hint = '"not that" may be the speaker correcting themselves';
+    await generateDictationPolish(config, "Send it to Sam, not that, send it to Alex.", ["corrections"], [hint]);
+    expect(sentInput(fetchMock).hints).toEqual([hint]);
+  });
+
+  it("sends no hints field when there are none", async () => {
+    const fetchMock = vi.fn(async () => toolResponse({ polished_text: "Hello there." }));
+    vi.stubGlobal("fetch", fetchMock);
+    await generateDictationPolish(config, "um hello there", ["cleanup"]);
+    expect(sentInput(fetchMock)).not.toHaveProperty("hints");
+  });
+
   it("passthrough without a call when no modes are enabled", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
