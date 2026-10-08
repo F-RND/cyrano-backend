@@ -18,6 +18,12 @@ export const MAX_POLISH_INPUT_CHARS = 2000;
  * formatting and bounds the bill. */
 const POLISH_MAX_OUTPUT_TOKENS = 512;
 
+/** The client sends at most 3 sense hints and 2 recovery hints per burst
+ * (`DictationSenseResolver.maxHints`, `DictationPolish.maxRecoveryHints`);
+ * anything past this cap, or longer than a hint ever is, is dropped. */
+export const MAX_POLISH_HINTS = 6;
+const MAX_POLISH_HINT_CHARS = 400;
+
 export function sanitizeModes(raw: unknown): PolishMode[] {
   if (!Array.isArray(raw)) return [];
   const set = new Set<PolishMode>();
@@ -27,6 +33,25 @@ export function sanitizeModes(raw: unknown): PolishMode[] {
     }
   }
   return [...set];
+}
+
+/**
+ * The device's notes about specific words — an undecided homonym, a possible
+ * self-correction ("not that", ", sorry,"), a word possibly cut off — that the
+ * client's deterministic passes refused to act on. Strings only, trimmed,
+ * clamped and capped; junk yields [].
+ */
+export function sanitizeHints(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const h of raw) {
+    if (typeof h !== "string") continue;
+    const hint = h.trim().slice(0, MAX_POLISH_HINT_CHARS);
+    if (hint.length === 0) continue;
+    out.push(hint);
+    if (out.length >= MAX_POLISH_HINTS) break;
+  }
+  return out;
 }
 
 /**
@@ -41,6 +66,7 @@ export async function generateDictationPolish(
   config: LlmConfig,
   text: string,
   modes: PolishMode[],
+  hints: string[] = [],
 ): Promise<{ text: string; source: "llm" | "passthrough" }> {
   const clamped = text.slice(0, MAX_POLISH_INPUT_CHARS);
   // No modes, or empty text: nothing to do — passthrough without spending a call.
@@ -51,7 +77,9 @@ export async function generateDictationPolish(
     const result = await callTool<{ polished_text: string }>(
       config,
       polishTool as ToolSchema,
-      { text: clamped, modes },
+      // Hints ride only when there are some, so a hint-free call is the
+      // same request it always was.
+      hints.length > 0 ? { text: clamped, modes, hints } : { text: clamped, modes },
       { maxTokens: POLISH_MAX_OUTPUT_TOKENS },
     );
     const polished = (result.polished_text ?? "").trim();
