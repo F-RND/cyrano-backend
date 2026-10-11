@@ -23,7 +23,7 @@ import {
   type UsageState,
 } from "./usage.js";
 import { usageDeltaFromWire } from "./llm/spend.js";
-import { FREE_COLD_PLAN, isEntitled, RELAY_PLAN } from "./entitlement.js";
+import { FREE_COLD_PLAN, isEntitled, RELAY_PLAN, sessionAnalysisAccess } from "./entitlement.js";
 import { generatePromoCode, promoExpiryFromMonths } from "./promo.js";
 import { generateLicenseKey, type LicenseRecord } from "./license.js";
 import {
@@ -1239,9 +1239,18 @@ export class RegistryDO implements DurableObject {
     const found = await this.findUserEntry(userId);
     if (!found) return Response.json({ found: false });
 
-    const view = usageView(found.usage, Date.now());
+    const now = Date.now();
+    const view = usageView(found.usage, now);
     return Response.json({
       found: true,
+      // The same verdict a live session's hello gets (`_entitlement` run
+      // through `sessionAnalysisAccess`), so a client can say "your key
+      // expired on <date>" on its plan screen BEFORE a session starts instead
+      // of claiming "active" because a key is saved. A transport-only plan
+      // reads false here, exactly as it does at hello.
+      entitled: sessionAnalysisAccess({ entitled: isEntitled(found, now), plan: found.plan }).userEntitled,
+      promo_expires_at: found.promoExpiresAt ?? null,
+      sub_expires_at: found.subExpiresAt ?? null,
       spend_micros: view.spendMicros,
       lifetime_micros: view.lifetimeMicros,
       period_start: view.periodStart,
