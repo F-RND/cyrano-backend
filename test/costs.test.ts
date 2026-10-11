@@ -945,3 +945,48 @@ describe("RegistryDO /_costs: a bounded, resumable scan", () => {
     expect(JSON.stringify(report)).not.toContain("THE-SECRET-TOKEN-HASH");
   });
 });
+
+describe("RegistryDO GET /_usage: the entitlement verdict a plan screen can show", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ now: NOW, toFake: ["Date"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function usageFor(registry: RegistryDO, userId: string): Promise<any> {
+    const res = await registry.fetch(new Request(`https://registry/_usage?user_id=${userId}`));
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  async function seed(storage: PagingStorage, label: string, userId: string, extra: object) {
+    await storage.put(`user-id:${userId}`, label);
+    await storage.put(`user:${label}`, { userId, label, hash: "h", createdAt: NOW - DAY, ...extra });
+  }
+
+  it("reads an expired promo key as not entitled, with its expiry", async () => {
+    const { registry, storage } = makeRegistry();
+    await seed(storage, "promo_lapsed", "u_lapsed", { promoExpiresAt: NOW - DAY });
+    const body = await usageFor(registry, "u_lapsed");
+    expect(body.entitled).toBe(false);
+    expect(body.promo_expires_at).toBe(NOW - DAY);
+    expect(body.sub_expires_at).toBeNull();
+  });
+
+  it("reads a live promo key and an active subscriber as entitled", async () => {
+    const { registry, storage } = makeRegistry();
+    await seed(storage, "promo_live", "u_live", { promoExpiresAt: NOW + DAY });
+    await seed(storage, "paying", "u_paying", { subStatus: "active", subExpiresAt: NOW + 30 * DAY });
+    expect((await usageFor(registry, "u_live")).entitled).toBe(true);
+    const paying = await usageFor(registry, "u_paying");
+    expect(paying.entitled).toBe(true);
+    expect(paying.sub_expires_at).toBe(NOW + 30 * DAY);
+  });
+
+  it("matches the hello gate for a transport-only plan: never entitled", async () => {
+    const { registry, storage } = makeRegistry();
+    await seed(storage, "relay_x", "u_relay", { plan: "pro-relay" });
+    expect((await usageFor(registry, "u_relay")).entitled).toBe(false);
+  });
+});
