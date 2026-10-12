@@ -6,7 +6,7 @@ import { isEntitled, RENEWAL_NOTICE_GRACE_MS } from "../src/entitlement.js";
 
 // A lapsed subscription degrades hosted analysis to on-device (2026-07-13), and
 // a promo/test key is entitled until its expiry (2026-07-14). This pins the
-// precedence: promo expiry wins, then Stripe status, then "never gated".
+// precedence: promo expiry wins, then subscription status, then "never gated".
 
 const T = 1_000_000_000_000;
 
@@ -60,10 +60,9 @@ describe("isEntitled — the verified paid-through date", () => {
     expect(isEntitled(renewed, T + 10 * 86_400_000)).toBe(true);
   });
 
-  it("leaves a Stripe subscriber (no expiry sent) governed by status alone", () => {
-    // Absent means "no opinion", never "expired" — Stripe's webhook does not
-    // send a period end, and reading the missing field as lapsed would cut off
-    // every Stripe subscriber at once.
+  it("leaves a subscriber with no expiry on record governed by status alone", () => {
+    // Absent means "no opinion", never "expired": reading the missing field as
+    // lapsed would cut off every subscriber whose record predates it.
     expect(isEntitled({ subStatus: "active" }, T)).toBe(true);
     expect(isEntitled({ subStatus: "active", subExpiresAt: null }, T)).toBe(true);
   });

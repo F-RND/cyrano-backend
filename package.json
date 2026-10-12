@@ -33,7 +33,6 @@
     "wrangler": "^4.137.0"
   },
   "dependencies": {
-    "stripe": "^23.0.0",
     "zod": "^4.6.5"
   },
   "overrides": {

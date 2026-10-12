@@ -6,7 +6,6 @@ Direct runtime dependencies:
 
 | Package | Resolved version at extraction | License |
 | --- | ---: | --- |
-| stripe | 22.6.2 | MIT |
 | zod | 3.25.76 | MIT |
 
 Direct development dependencies include Cloudflare Workers types and Wrangler (MIT or Apache-2.0), TypeScript (Apache-2.0), and Node/Vitest/tsx tooling (MIT).

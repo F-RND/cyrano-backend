@@ -163,15 +163,12 @@ interface StoredUser {
   plan?: string; // "annual" | "monthly" | undefined (free/self-host)
   subStatus?: string; // "active" | "past_due" | "canceled" | undefined
   usage?: UsageState; // per-period meter of OUR LLM spend for this tenant
-  // Stripe linkage. Present only for
-  // subscribers provisioned through the Stripe webhook; the subscription id is
-  // the idempotency key (Stripe redelivers events — we mint at most one tenant
-  // token per subscription).
-  stripeCustomerId?: string;
+  // The subscription this tenant was minted for: `apple:<originalTransactionId>`
+  // (appstore.ts). The name is historical (a Stripe checkout once wrote it
+  // too) and is kept because stored records and the subscription index use it.
   stripeSubscriptionId?: string;
   // Verified paid-through date (ms), added 2026-08-03. Written from the signed
-  // Apple transaction, which states it; Stripe's webhook does not send one, so
-  // Stripe subscribers leave it absent and are governed by status alone.
+  // Apple transaction, which states it.
   // entitlement.ts reads it as a backstop against a renewal notification that
   // never arrives — absent means "no opinion", never "expired".
   subExpiresAt?: number;
@@ -179,20 +176,6 @@ interface StoredUser {
   // Present → entitlement gates on it; absent →
   // a normal (subscription- or operator-minted) tenant. See promo.ts / entitlement.ts.
   promoExpiresAt?: number;
-}
-
-/** A minted tenant token stashed for one-time pickup by the post-checkout
- * `/stripe/activated` page, keyed by the Stripe Checkout Session id. Only the
- * hash of a tenant token is ever stored on the user record, so the RAW token
- * has to be held here for the brief window between the webhook minting it and
- * the success page delivering it to the app. Consumed on first read (the
- * `token` is dropped, `consumed` marker kept a while) so a page reload can't
- * re-deliver or rotate a working credential. */
-interface ClaimStash {
-  token?: string;
-  userId: string;
-  createdAt: number;
-  consumed?: boolean;
 }
 
 const USER_PREFIX = "user:";
@@ -324,8 +307,8 @@ export class RegistryDO implements DurableObject {
     private readonly env: Env,
   ) {
     // Older deployments stored every tenant in one JSON value under `users`.
-    // Split it once on wake, preserving all existing credentials and Stripe
-    // linkage while removing the per-value size ceiling and whole-list writes.
+    // Split it once on wake, preserving all existing credentials and
+    // subscription links while removing the per-value size ceiling and whole-list writes.
     ctx.blockConcurrencyWhile(() => this.migrateLegacyUsers());
   }
 
@@ -450,17 +433,11 @@ export class RegistryDO implements DurableObject {
     if (request.method === "GET" && url.pathname === "/_usage") {
       return this.readUsage(url);
     }
-    if (request.method === "POST" && url.pathname === "/_provision") {
-      return this.provisionSubscriber(request);
-    }
     if (request.method === "POST" && url.pathname === "/_subscription") {
       return this.setSubscription(request);
     }
     if (request.method === "POST" && url.pathname === "/_appstore_link") {
       return this.appStoreLink(request);
-    }
-    if (request.method === "GET" && url.pathname === "/_claim") {
-      return this.claim(url);
     }
     if (request.method === "GET" && url.pathname === "/_entitlement") {
       return this.readEntitlement(url);
@@ -1301,7 +1278,7 @@ export class RegistryDO implements DurableObject {
     });
   }
 
-  // ---- Stripe subscriptions (paid hosted tier) ----
+  // ---- Subscriptions (paid hosted tier) ----
 
   private async findUserBySubscription(
     subscriptionId: string,
@@ -1311,7 +1288,7 @@ export class RegistryDO implements DurableObject {
     return (await this.getUserByLabel(label)) ?? null;
   }
 
-  /** Aligns the meter period to the Stripe billing period so per-user spend
+  /** Aligns the meter period to the billing period so per-user spend
    * resets on renewal, not on a rolling 30-day window. Keeps lifetime totals.
    * The provider+model breakdown and the BYOK count are period-scoped — they
    * explain THIS period's bill — so they reset with the spend they explain. */
@@ -1330,102 +1307,11 @@ export class RegistryDO implements DurableObject {
   }
 
   /**
-   * A paid `checkout.session.completed` or
-   * `checkout.session.async_payment_succeeded`: mint a tenant token for a brand-new
-   * subscriber, or reuse the existing one on a Stripe redelivery. Idempotent
-   * by `stripe_subscription_id` — Stripe re-sends webhook events, and this must
-   * never mint two tokens (two bills' worth of access) for one subscription.
-   *
-   * A newly minted token is stashed under `claim:<cs_id>` for one-time pickup
-   * by the success page (only the hash lands on the user record). A reuse
-   * normally returns no token — the subscriber already has one. If the same
-   * checkout still has an unconsumed claim stash, return that original token
-   * so the success-page fallback cannot lose a race with the webhook.
-   */
-  private async provisionSubscriber(request: Request): Promise<Response> {
-    const b = (await request.json().catch(() => ({}))) as {
-      stripe_subscription_id?: string;
-      stripe_customer_id?: string;
-      plan?: string;
-      sub_status?: string;
-      period_start?: number;
-      cs_id?: string;
-    };
-    if (!b.stripe_subscription_id) {
-      return Response.json({ error: "missing_subscription_id" }, { status: 400 });
-    }
-
-    // Prepare the candidate outside the transaction: Web Crypto is external
-    // async work and must not sit between the uniqueness check and writes.
-    const label = `stripe_${b.stripe_subscription_id}`;
-    const token = randomToken("cyrano_user");
-    const userId = crypto.randomUUID();
-    const candidate: StoredUser = {
-      userId,
-      label,
-      hash: await sha256Hex(token),
-      createdAt: Date.now(),
-      plan: b.plan,
-      subStatus: b.sub_status ?? "active",
-      stripeCustomerId: b.stripe_customer_id,
-      stripeSubscriptionId: b.stripe_subscription_id,
-      usage: b.period_start ? RegistryDO.alignedUsage(undefined, b.period_start) : undefined,
-    };
-
-    const result = await this.ctx.storage.transaction(async (txn) => {
-      const subscriptionKey = `${USER_SUBSCRIPTION_INDEX_PREFIX}${b.stripe_subscription_id}`;
-      const existingLabel = await txn.get<string>(subscriptionKey);
-      const existing = existingLabel
-        ? await txn.get<StoredUser>(RegistryDO.userKey(existingLabel))
-        : undefined;
-
-      if (existing) {
-        // Reuse: refresh subscription state, never rotate the live token.
-        const updated: StoredUser = {
-          ...existing,
-          plan: b.plan ?? existing.plan,
-          subStatus: b.sub_status ?? existing.subStatus,
-          stripeCustomerId: b.stripe_customer_id ?? existing.stripeCustomerId,
-          usage: b.period_start ? RegistryDO.alignedUsage(existing.usage, b.period_start) : existing.usage,
-        };
-        await txn.put(RegistryDO.userKey(updated.label), updated);
-        await txn.put(`${USER_ID_INDEX_PREFIX}${updated.userId}`, updated.label);
-        await txn.put(`${USER_HASH_INDEX_PREFIX}${updated.hash}`, updated.label);
-        await txn.put(subscriptionKey, updated.label);
-
-        const claim = b.cs_id
-          ? await txn.get<ClaimStash>(`claim:${b.cs_id}`)
-          : undefined;
-        return { reused: true as const, userId: updated.userId, token: claim?.token };
-      }
-
-      // The subscription lookup and every user/index/claim write commit as one
-      // unit, so completed + async-succeeded webhook deliveries cannot mint
-      // two credentials for the same Stripe subscription.
-      await txn.put(RegistryDO.userKey(candidate.label), candidate);
-      await txn.put(`${USER_ID_INDEX_PREFIX}${candidate.userId}`, candidate.label);
-      await txn.put(`${USER_HASH_INDEX_PREFIX}${candidate.hash}`, candidate.label);
-      await txn.put(subscriptionKey, candidate.label);
-      if (b.cs_id) {
-        const stash: ClaimStash = { token, userId: candidate.userId, createdAt: Date.now() };
-        await txn.put(`claim:${b.cs_id}`, stash);
-      }
-      return { reused: false as const, userId: candidate.userId, token };
-    });
-
-    return Response.json({
-      reused: result.reused,
-      user_id: result.userId,
-      ...(result.token ? { token: result.token } : {}),
-    });
-  }
-
-  /**
-   * `customer.subscription.updated|deleted` / `invoice.payment_failed`: update
-   * an existing subscriber's plan/status (degrade, never delete — the token
+   * An App Store notification (appstore.ts): update an existing subscriber's
+   * plan/status (degrade, never delete — the token
    * keeps working through a grace window; a canceled sub just flips the flag).
    * A no-op when the subscription isn't one we minted for. Keyed by
-   * subscription id (webhook events) or user_id (the handoff's direct form).
+   * subscription id (store notifications) or user_id (the direct form).
    */
   private async setSubscription(request: Request): Promise<Response> {
     const b = (await request.json().catch(() => ({}))) as {
@@ -1435,7 +1321,6 @@ export class RegistryDO implements DurableObject {
       sub_status?: string;
       period_start?: number;
       period_end?: number;
-      stripe_customer_id?: string;
     };
     const found = b.stripe_subscription_id
       ? await this.findUserBySubscription(b.stripe_subscription_id)
@@ -1448,36 +1333,13 @@ export class RegistryDO implements DurableObject {
       ...found,
       plan: b.plan ?? found.plan,
       subStatus: b.sub_status ?? found.subStatus,
-      stripeCustomerId: b.stripe_customer_id ?? found.stripeCustomerId,
       // A renewal notification carries the NEW paid-through date, and moving it
       // forward is the whole point: entitlement.ts treats an `active` record
-      // stuck behind its expiry as one nobody ever told us about. Stripe never
-      // sends the field, so its subscribers keep whatever they had (nothing).
+      // stuck behind its expiry as one nobody ever told us about.
       subExpiresAt: b.period_end ?? found.subExpiresAt,
       usage: b.period_start ? RegistryDO.alignedUsage(found.usage, b.period_start) : found.usage,
     });
     return Response.json({ found: true, user_id: found.userId });
-  }
-
-  /**
-   * One-time token delivery for the post-checkout page. The first read returns
-   * the stashed token and marks it consumed; later reads (a reload) return
-   * `consumed` with no token, so a working credential is never re-issued or
-   * rotated out from under an already-activated app.
-   */
-  private async claim(url: URL): Promise<Response> {
-    const csId = url.searchParams.get("cs_id");
-    if (!csId) return Response.json({ error: "missing_cs_id" }, { status: 400 });
-
-    const key = `claim:${csId}`;
-    const stash = await this.ctx.storage.get<ClaimStash>(key);
-    if (!stash) return Response.json({ found: false });
-    if (stash.consumed || !stash.token) {
-      return Response.json({ found: true, consumed: true });
-    }
-
-    await this.ctx.storage.put(key, { userId: stash.userId, createdAt: stash.createdAt, consumed: true });
-    return Response.json({ found: true, token: stash.token, user_id: stash.userId });
   }
 
   /**
@@ -1576,8 +1438,7 @@ export class RegistryDO implements DurableObject {
     };
   }
 
-  /** Mint a device-bindable license key (operator-only upstream). A future
-   *  Stripe `mode:"payment"` webhook writes this same record. */
+  /** Mint a device-bindable license key (operator-only upstream). */
   private async mintLicense(request: Request): Promise<Response> {
     const b = (await request.json().catch(() => ({}))) as { email?: string };
     const now = new Date().toISOString();
@@ -1704,8 +1565,7 @@ export class RegistryDO implements DurableObject {
   /**
    * Exchange an ACTIVE, device-bound Pro license for a `pro-relay` tenant
    * token — the credential a Pro user's live session presents to transit the
-   * Worker for the agent loop. Idempotent per license (same discipline as
-   * Stripe's `/_provision`): the identity is minted once and reused forever;
+   * Worker for the agent loop. Idempotent per license: the identity is minted once and reused forever;
    * a re-request ROTATES the token (new secret, old one dead) rather than
    * minting a second identity, which is also how a lost token is recovered —
    * the license is re-presented, so only the raw token's hash ever persists.
@@ -1717,10 +1577,8 @@ export class RegistryDO implements DurableObject {
   /**
    * Exchange a verified App Store subscription for a tenant token.
    *
-   * Structurally `relayTokenForLicense`, not `provisionSubscriber`, and that
-   * choice is the whole design: `provisionSubscriber` returns the token only on
-   * first mint, because Stripe hands it to a web page once. Apple has no such
-   * page. The client asks for this directly after purchase, after a restore on
+   * Structurally `relayTokenForLicense`: the token comes back on every
+   * request, not only on first mint. The client asks for this directly after purchase, after a restore on
    * a second device, and after every renewal — and each of those needs a usable
    * token in the response. So this ROTATES on re-request, like the relay path,
    * and the old secret dies with it.
@@ -1731,8 +1589,7 @@ export class RegistryDO implements DurableObject {
    * `stripeSubscriptionId` carries the `apple:<originalTransactionId>` id so the
    * existing `user-subscription:` index — and therefore `_subscription`, which
    * Apple's notifications write through — finds this record with no new index
-   * and no changes to putUser/revokeUser. The field name is Stripe's; the index
-   * it feeds is not.
+   * and no changes to putUser/revokeUser. The field name is historical.
    *
    * Both the id and the label are namespaced by Apple's environment
    * (appstore.ts owns the rule, so the two can never drift apart). A sandbox
