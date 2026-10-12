@@ -10,8 +10,12 @@
 // only the hosted cloud copilot stops (with a "renew or bring your own key"
 // banner). So entitlement gates hosted *analysis*, never authentication.
 
-/** Stripe subscription statuses that grant hosted access. `past_due` is
- * included as grace during Stripe's dunning retries; a truly canceled / unpaid
+/** Our three subscription states, as written to a subscriber record by
+ * appstore.ts (from Apple's notification vocabulary). */
+export type SubStatus = "active" | "past_due" | "canceled";
+
+/** Subscription statuses that grant hosted access. `past_due` is included as
+ * grace while the store retries a failed renewal; a truly canceled / unpaid
  * / expired-before-first-payment subscription is not entitled. */
 const ENTITLED_STATUSES = new Set(["active", "trialing", "past_due"]);
 
@@ -33,9 +37,8 @@ export interface EntitlementInputs {
    * "not a promo key" (fall through to subStatus). See promo.ts. */
   promoExpiresAt?: number | null;
   /** Verified paid-through date (ms), when the payment provider gave us one.
-   * Apple does, inside every signed transaction; Stripe's webhook does not send
-   * one, so for Stripe subscribers this is absent and status remains the only
-   * signal. Absent means "no opinion", never "expired". */
+   * Apple does, inside every signed transaction. Absent means "no opinion",
+   * never "expired": status remains the only signal. */
   subExpiresAt?: number | null;
 }
 
@@ -44,7 +47,7 @@ export interface EntitlementInputs {
  *
  * Precedence:
  *  1. Promo key (`promoExpiresAt` set) → entitled while `now < promoExpiresAt`.
- *  2. Stripe subscriber (`subStatus` set) → entitled while the status is active
+ *  2. Subscriber (`subStatus` set) → entitled while the status is active
  *     / trialing / past_due (dunning grace).
  *  3. Neither → entitled. Operator-minted tenants and self-hosters are never
  *     subscription-gated; they keep working exactly as before this feature.
@@ -91,7 +94,7 @@ export const RELAY_PLAN = "pro-relay";
  * billing, revocation, and the connector gate can tell them apart — which is
  * exactly why this is a separate constant and not a reuse of RELAY_PLAN.
  *
- * NOT YET SOLD. No Stripe price, no checkout arm, and no client tier reads it;
+ * NOT YET SOLD. No price, no purchase path, and no client tier reads it;
  * the plan doc's P1 wires those. It exists now so the analysis guard below is
  * correct on the day an identity first carries it, rather than default-allowing
  * a paying MCP+ user onto the operator's LLM key. */

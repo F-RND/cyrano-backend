@@ -72,7 +72,7 @@ Layout:
 | `src/llm/` | Provider client (Anthropic native + OpenAI-compatible), fallback leg, pricing and spend metering |
 | `src/policy/` | The interruption-etiquette grammar and simulator that gates whisper delivery |
 | `src/auth.ts`, `src/entitlement.ts`, `src/license.ts`, `src/promo.ts`, `src/trial.ts` | Identity, plans, and the key formats |
-| `src/stripe.ts`, `src/appstore*.ts` | Optional hosted-tier billing, inert without their secrets |
+| `src/appstore*.ts` | Optional App Store billing for the hosted tier, off unless enabled |
 | `src/chatgpt-mcp.ts` | OAuth 2.1 / PKCE authorization server and MCP resource for connector clients |
 | `src/mcp/workflows.json` | The text of every MCP workflow, shared with the app's local catalog |
 | `schemas/` | JSON schemas for every forced tool call the model makes |
@@ -105,7 +105,7 @@ Every workflow's text lives in [`src/mcp/workflows.json`](src/mcp/workflows.json
 
 | Kind | Examples | Production | Local `npm run dev` |
 | --- | --- | --- | --- |
-| Secrets | `AUTH_TOKEN`, `LLM_API_KEY`, `STRIPE_SECRET_KEY`, any key named by a `*_KEY_ENV` variable | `npx wrangler secret put NAME` | `.dev.vars` |
+| Secrets | `AUTH_TOKEN`, `LLM_API_KEY`, `TRIAL_SIGNING_PRIVATE_KEY`, any key named by a `*_KEY_ENV` variable | `npx wrangler secret put NAME` | `.dev.vars` |
 | Variables | `LLM_MODEL`, `LLM_BASE_URL`, `FALLBACK_*`, feature flags | `vars` block in `wrangler.jsonc` | `.dev.vars` (overrides `vars`) |
 
 Every value the Worker reads is a string. Boolean flags are opt-in only on the literal, case-sensitive string `"true"`. `.dev.vars.example` lists every variable with its optional groups commented out.
@@ -160,7 +160,7 @@ A second provider tried exactly once after the primary fails in a retryable way.
 
 ### Hosted paid tier (optional)
 
-Only meaningful when sessions have an owning user (Stripe or App Store entitlement). Self-host deployments that set none of these run unchanged.
+Only meaningful when sessions have an owning user (an App Store subscription or a promo key). Self-host deployments that set none of these run unchanged.
 
 | Name | Kind | Default | Notes |
 | --- | --- | --- | --- |
@@ -168,10 +168,6 @@ Only meaningful when sessions have an owning user (Stripe or App Store entitleme
 | `HOSTED_PAID_PROVIDER` | var | — | Unset: owned sessions run the paid model on the **primary** leg (`LLM_PROVIDER`'s wire at `LLM_BASE_URL`). `anthropic`, `openrouter` or `openai`: owned sessions speak that wire at `HOSTED_PAID_BASE_URL`, even after the primary moves elsewhere. |
 | `HOSTED_PAID_BASE_URL` | var | the tag's public root — `api.openai.com` for `openai`, `openrouter.ai` for `openrouter`; for `anthropic`, `LLM_BASE_URL` while the primary is Anthropic, else `api.anthropic.com` | `/v1` root for the paid provider. |
 | `HOSTED_PAID_KEY_ENV` | var | `LLM_API_KEY` | Name of the secret holding the paid-provider key. Name one whenever the paid host is not the primary's. |
-| `STRIPE_SECRET_KEY` | secret | — | Stripe routes return 503 without it. |
-| `STRIPE_WEBHOOK_SECRET` | secret | — | Webhook signature verification. |
-| `STRIPE_PRICE_ANNUAL`, `STRIPE_PRICE_MONTHLY` | var | — | Recurring Price ids. |
-| `LANDING_BASE_URL` | var | — | Origin for Checkout return/cancel URLs. |
 | `TRIAL_SIGNING_PRIVATE_KEY` | secret | — | Base64 PKCS8 Ed25519 key for signing trial tokens; unset disables `/trial/*`. |
 | `PLAN_REVENUE_USD_PER_MONTH` | var | list prices | JSON `{plan: usd}` for the `/costs` report only; nothing bills on it. |
 
@@ -229,7 +225,7 @@ Every optional integration either returns 503 or is skipped entirely when its co
 - App Store link and notification routes (`APP_STORE_ENABLED`, plus `APPLE_BUNDLE_IDS` and `APPLE_ENVIRONMENT`)
 - Token-less free-tier enrollment (`FREE_COLD_ENROLLMENT_ENABLED`)
 - The bug-report relay (`BUG_REPORT_NOTIFY_URL`)
-- Stripe checkout and webhooks, trials, and the hosted paid model (their secrets)
+- Trials and the hosted paid model (their secrets)
 - Cloudflare observability (`observability.enabled`)
 
 Flags are opt-in only on the literal string `"true"`; a missing, empty, or differently-cased value leaves the route unavailable. Read the data-flow notes in the section below before enabling anything that adds a provider or a public route.

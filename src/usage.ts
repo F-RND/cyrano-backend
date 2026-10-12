@@ -17,8 +17,8 @@
 
 import { worseBasis, type PriceBasis } from "./llm/pricing.js";
 
-/** Rolling metering period. In P2 this aligns to the Stripe billing period;
- * until then it's a 30-day window from the first metered activity. "Activity",
+/** Rolling metering period: a 30-day window from the first metered activity
+ * (an App Store renewal realigns it to the billing period). "Activity",
  * not "spend", since 2026-08-19: a BYOK call reports zero micro-dollars and a
  * call count, and that report is what starts the window for a subject who only
  * ever brings their own key. */

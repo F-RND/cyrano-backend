@@ -31,7 +31,6 @@ import {
   sanitizeScope,
   MAX_REFINE_INPUT_BYTES,
 } from "./analysis/context-refine.js";
-import { handleActivated, handleBuy, handleStripeWebhook } from "./stripe.js";
 import { handleAppStoreLink, handleAppStoreNotifications } from "./appstore.js";
 import {
   handleChatGPTManagementRequest,
@@ -207,25 +206,9 @@ export default {
     const chatGPTPublicResponse = await handleChatGPTPublicRequest(request, env);
     if (chatGPTPublicResponse) return chatGPTPublicResponse;
 
-    // Stripe subscription funnel (paid hosted tier).
-    // These are the ONLY routes reachable without a Cyrano bearer token, so
-    // they sit ahead of resolveIdentity: /buy is a public checkout link,
-    // /stripe/webhook is authenticated by Stripe's signature, and
-    // /stripe/activated is authenticated by possession of a real, paid Stripe
-    // Checkout Session id (verified against Stripe inside the handler).
-    if (request.method === "GET" && url.pathname === "/buy") {
-      return handleBuy(request, env);
-    }
-    if (request.method === "POST" && url.pathname === "/stripe/webhook") {
-      return handleStripeWebhook(request, env);
-    }
-    if (request.method === "GET" && url.pathname === "/stripe/activated") {
-      return handleActivated(request, env);
-    }
-
-    // App Store subscriptions for the same hosted tier (appstore.ts). Token-less
-    // for the same reason the Stripe routes are: the signed transaction (or
-    // Apple's signed notification) IS the credential, verified against Apple's
+    // App Store subscriptions for the paid hosted tier (appstore.ts). These sit
+    // ahead of resolveIdentity because they carry no Cyrano bearer token: the
+    // signed transaction (or Apple's signed notification) IS the credential, verified against Apple's
     // pinned root before anything is written. /link is what turns a StoreKit
     // purchase into a usable Pro+ — without it the subscription buys nothing.
     if (request.method === "POST" && url.pathname === "/appstore/link") {
@@ -242,7 +225,7 @@ export default {
     }
 
     // Lifetime Pro license lifecycle. Token-less
-    // like the Stripe routes and for the same reason: the credential IS the
+    // like the App Store routes and for the same reason: the credential IS the
     // license key + device id in the body, and a license grants nothing
     // server-side (it only flips the client's proUnlocked — Pro processing is
     // entirely on-device), so there is no tenant to authenticate. Forwarded to
@@ -861,8 +844,7 @@ export default {
 
     // Lifetime Pro license keys (operator-only). Mints a device-bindable license
     // key — hand the returned CYRANO-XXXX-XXXX-XXXX-XXXX to a tester, who enters
-    // it in Settings → Unlock Pro. Body: {email?}. Stripe mints these later via
-    // a mode:"payment" webhook writing the same record.
+    // it in Settings → Unlock Pro. Body: {email?}.
     if (url.pathname === "/license-keys") {
       if (identity.kind !== "operator") {
         return new Response("forbidden", { status: 403 });
@@ -914,7 +896,7 @@ export default {
     // subject with what they cost us this period and all-time, ranked, with the
     // provider+model breakdown, how much of it is a published price, BYOK call
     // counts, plan/subscription state, and the purchase record ALREADY on the
-    // user record (Apple's opaque original-transaction id / Stripe's ids /
+    // user record (Apple's opaque original-transaction id /
     // promo / label). Nothing new is collected from any client to make this
     // work — see the header of costs.ts and BAR invariant I7.
     //

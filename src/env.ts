@@ -44,20 +44,6 @@ export interface Env {
   // leaves the Worker; a leaked public key is harmless.
   TRIAL_SIGNING_PRIVATE_KEY?: string;
 
-  // --- Paid hosted tier (Stripe subscriptions) ---
-  // All optional so an existing self-host deployment that sets none of them
-  // typechecks and runs unchanged — the Stripe routes simply refuse (503)
-  // when the secrets aren't present, and hosted sessions fall back to
-  // LLM_MODEL when HOSTED_PAID_MODEL is unset.
-  //
-  // Secrets (`wrangler secret put`): the Stripe API key + webhook signing secret.
-  STRIPE_SECRET_KEY?: string;
-  STRIPE_WEBHOOK_SECRET?: string;
-  // Vars (wrangler.jsonc): the two recurring Price ids + the marketing origin
-  // used for Checkout cancel/return URLs.
-  STRIPE_PRICE_ANNUAL?: string;
-  STRIPE_PRICE_MONTHLY?: string;
-  LANDING_BASE_URL?: string;
   // --- Paid hosted tier, App Store side (appstore.ts) ---
   // These token-less routes are inert unless this literal opt-in is set.
   APP_STORE_ENABLED?: string;
@@ -145,7 +131,7 @@ export interface Env {
   // Merged over the defaults in costs.ts (the LIST prices from
   // checked-in reporting defaults: $1.99 annual-billed, $4.99 monthly), so naming
   // one plan leaves the others alone. It exists because the default is GROSS —
-  // before Apple's 15–30%, before Stripe's ~3% + 30¢, before tax and refunds —
+  // before Apple's 15–30%, before tax and refunds —
   // and an operator who wants the NET column to mean net sets the net figures
   // here. Purely a reporting knob: nothing bills, gates, or meters on it.
   PLAN_REVENUE_USD_PER_MONTH?: string;

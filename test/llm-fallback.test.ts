@@ -15,6 +15,9 @@
 // (5xx-only) would not have fired for the situation this was built for — an
 // Anthropic key out of credit, which arrives as a 400.
 
+// Reads the repo's own sources from disk, so it needs Node's types; the Worker
+// code keeps workers-types alone (tsconfig).
+/// <reference types="node" />
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

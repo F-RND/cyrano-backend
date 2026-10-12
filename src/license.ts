@@ -3,7 +3,7 @@
 
 // Lifetime Pro license keys.
 //
-// A license is a device-bound, operator-minted (later Stripe-minted) key that
+// A license is a device-bound, operator-minted key that
 // unlocks the all-on-device Pro smart layer. It is deliberately NOT a promo key
 // (promo.ts): a promo IS a hosted-tier bearer token and grants server-side
 // entitlement, whereas a license grants NOTHING on the server — it only flips
@@ -12,8 +12,7 @@
 // identity: activate once to bind
 // a device, then periodic revalidation with a long client-side offline grace.
 //
-// The record shape is shared by operator key-generation tooling and a future
-// Stripe `mode:"payment"` webhook.
+// The record shape is shared with operator key-generation tooling.
 
 // Crockford-style alphabet (drops 0/1/I/O), identical to promo.ts. Four groups
 // (vs the promo's three) so a Pro license reads distinctly from a hosted promo

@@ -17,8 +17,6 @@
 //     Apple never sends us one — and it is not an email, a name, or a device.
 //     It is the string you paste into App Store Connect to find the same
 //     subscription from the other side, which is the entire point.
-//   - Stripe: `stripeCustomerId` / `stripeSubscriptionId`, already on the
-//     record from the checkout webhook.
 //   - Promo / operator-minted: the label the operator chose, plus the promo
 //     expiry. The operator wrote the label; it tells them nothing new.
 // The subject-identity rules are documented inline below.
@@ -79,7 +77,6 @@ export type SubjectSource =
    *  money: Apple never charges for a sandbox purchase, so this prices at zero
    *  like a promo key rather than at the plan's list price. */
   | "apple-sandbox"
-  | "stripe"
   | "promo"
   | "license-relay"
   | "free-cold"
@@ -99,11 +96,9 @@ export interface PurchaseLink {
    * side. NOT an Apple ID, an email, or a device.
    */
   apple_original_transaction_id: string | null;
-  stripe_customer_id: string | null;
-  stripe_subscription_id: string | null;
   /** ISO 8601, or null. Present → a comped promo/test key. */
   promo_expires_at: string | null;
-  /** ISO 8601, or null. Apple states a paid-through date; Stripe does not. */
+  /** ISO 8601, or null. Apple states a paid-through date. */
   sub_expires_at: string | null;
 }
 
@@ -117,7 +112,6 @@ export interface CostSubjectRecord {
   subStatus?: string;
   subExpiresAt?: number;
   promoExpiresAt?: number;
-  stripeCustomerId?: string;
   stripeSubscriptionId?: string;
   usage?: UsageState;
 }
@@ -138,17 +132,10 @@ export function purchaseLinkFor(u: CostSubjectRecord): PurchaseLink {
       : null;
   const common = {
     apple_original_transaction_id: apple,
-    // The field name is Stripe's and the index it feeds is Stripe's, but an
-    // Apple subscription is stored in it (registry-do appStoreLink says why).
-    // Reporting it under `stripe_*` for an Apple subject would be a lie the
-    // operator then has to remember, so Apple's id appears ONLY above.
-    stripe_customer_id: apple ? null : (u.stripeCustomerId ?? null),
-    stripe_subscription_id: apple ? null : (sub ?? null),
     promo_expires_at: isoOrNull(u.promoExpiresAt),
     sub_expires_at: isoOrNull(u.subExpiresAt),
   };
   if (apple) return { source: appleSandbox ? "apple-sandbox" : "apple", ...common };
-  if (sub) return { source: "stripe", ...common };
   // A promo key with `months: 0` is unlimited and stores NO expiry (promo.ts
   // promoExpiryFromMonths), so the label prefix is the only signal left for
   // one minted without an operator-supplied label. A lifetime promo minted
@@ -177,7 +164,7 @@ export function purchaseLinkFor(u: CostSubjectRecord): PurchaseLink {
  *    one device slot — the answer is 0 or 1.
  *  - `self`: a `freecold_<sha256(deviceId)>` identity (registry-do
  *    `enrollFreeCold`). The identity IS one device, by construction.
- *  - `none`: an App Store or Stripe subscription, a promo key, or an operator
+ *  - `none`: an App Store subscription, a promo key, or an operator
  *    tenant. A subscription is not device-bound — it is restored onto every
  *    device the buyer signs in on and we are told about none of them — so the
  *    honest answer is "not linked", never 0. Aggregate device counts for those
@@ -216,10 +203,10 @@ export type DeviceSource = "license" | "device-identity" | "none";
  * 2026-07-13 pricing: $1.99/mo billed annually ($23.88/yr), $4.99/mo monthly.
  *
  * THIS IS GROSS. It is what the customer is charged, not what lands in the
- * bank: Apple keeps 15–30%, Stripe roughly 3% + 30¢, and neither tax, refunds,
+ * bank: Apple keeps 15–30%, and neither tax, refunds,
  * chargebacks, nor proration is visible from here. An operator who wants the
  * net figure sets PLAN_REVENUE_USD_PER_MONTH (see {@link planRevenueFromEnv})
- * — the doc quotes ~$1.85 / ~$4.24 net of Stripe fees. The report labels this
+ * — e.g. after Apple's cut. The report labels this
  * `revenue_basis: "configured"` for the same reason llm/pricing.ts labels a
  * rate it cannot cite: a number somebody chose must not read as a bill.
  *
@@ -375,7 +362,7 @@ export interface CostRow {
   user_id: string;
   /** The registry label. For a subscriber this is derived from the purchase
    * record (`apple_<otid>`, `apple_sandbox_<otid>` for a TestFlight or App
-   * Review purchase, `stripe_<sub>`); for an operator tenant it is whatever
+   * Review purchase); for an operator tenant it is whatever
    * the operator typed. Never an email, never a device. */
   label: string;
   first_seen_at: string;
@@ -419,7 +406,7 @@ export interface CostRow {
   shadow_legs: CostLegRow[];
   // --- the answer to "are they paying more than they cost" ---
   /** GROSS list price for a WHOLE period (see {@link CostReport.period_days}),
-   * before Apple's / Stripe's cut, tax, refunds and proration. 0 for a comped
+   * before Apple's cut, tax, refunds and proration. 0 for a comped
    * or LAPSED subject; null when no price is known. This is the plan's sticker
    * price and is NOT comparable with the cost columns above, which cover only
    * the part of the period that has actually elapsed — use

@@ -157,9 +157,9 @@ describe("registry _appstore_link", () => {
     expect(storage.map.get(`user-subscription:apple:${OTID}`)).toBe(LABEL);
   });
 
-  it("keeps Apple and Stripe records separate in the shared subscription index", async () => {
+  it("namespaces Apple records in the subscription index", async () => {
     // The namespaced id is what stops an Apple originalTransactionId from ever
-    // resolving to a Stripe subscription's tenant, or vice versa.
+    // resolving to a record keyed on the same bare string.
     const { registry: reg, storage } = registry();
     await reg.fetch(link({ original_transaction_id: "sub_123", plan: "monthly" }));
     expect(storage.map.get("user-subscription:apple:sub_123")).toBe("apple_sub_123");
