@@ -127,8 +127,6 @@ describe("I7: the operator row is a CLOSED shape over data already stored", () =
   const PURCHASE_KEYS = [
     "source",
     "apple_original_transaction_id",
-    "stripe_customer_id",
-    "stripe_subscription_id",
     "promo_expires_at",
     "sub_expires_at",
   ];
@@ -143,15 +141,14 @@ describe("I7: the operator row is a CLOSED shape over data already stored", () =
     const row = costRowFor(
       record({
         label: `relay_${HASH_A}`,
-        stripeCustomerId: "cus_123",
-        stripeSubscriptionId: "sub_456",
+        stripeSubscriptionId: "apple:2000000912345678",
         usage: usage(),
       }),
       { now: NOW, devices: 1 },
     );
     const flat = JSON.stringify(row);
-    // The label and the billing ids are the only free-form strings a row may
-    // carry, and all three were already on the user record.
+    // The label and the billing id are the only free-form strings a row may
+    // carry, and both were already on the user record.
     for (const forbidden of ["@", "device_id", "deviceId", "fingerprint", "email"]) {
       expect(flat).not.toContain(forbidden);
     }
@@ -163,16 +160,10 @@ describe("I7: the operator row is a CLOSED shape over data already stored", () =
 // ---------------------------------------------------------------------------
 
 describe("purchaseLinkFor: the purchase record already on the user record", () => {
-  it("unwraps Apple's opaque original-transaction id and never files it under stripe_*", () => {
-    const link = purchaseLinkFor(
-      record({ stripeSubscriptionId: "apple:2000000912345678", stripeCustomerId: "cus_should_not_appear" }),
-    );
+  it("unwraps Apple's opaque original-transaction id", () => {
+    const link = purchaseLinkFor(record({ stripeSubscriptionId: "apple:2000000912345678" }));
     expect(link.source).toBe("apple");
     expect(link.apple_original_transaction_id).toBe("2000000912345678");
-    // The field name is Stripe's and an Apple subscription is stored in it;
-    // reporting it as a Stripe id would be a lie the operator has to remember.
-    expect(link.stripe_subscription_id).toBeNull();
-    expect(link.stripe_customer_id).toBeNull();
   });
 
   it("marks a sandbox subscription as such and still yields a pasteable Apple id", () => {
@@ -183,17 +174,6 @@ describe("purchaseLinkFor: the purchase record already on the user record", () =
     const link = purchaseLinkFor(record({ stripeSubscriptionId: "apple:sandbox:2000000912345678" }));
     expect(link.source).toBe("apple-sandbox");
     expect(link.apple_original_transaction_id).toBe("2000000912345678");
-    expect(link.stripe_subscription_id).toBeNull();
-  });
-
-  it("reports a Stripe subscriber under the Stripe ids and no Apple id", () => {
-    const link = purchaseLinkFor(record({ stripeCustomerId: "cus_9", stripeSubscriptionId: "sub_9" }));
-    expect(link).toMatchObject({
-      source: "stripe",
-      apple_original_transaction_id: null,
-      stripe_customer_id: "cus_9",
-      stripe_subscription_id: "sub_9",
-    });
   });
 
   it("classifies a promo key by its expiry OR its minted label prefix", () => {

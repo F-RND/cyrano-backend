@@ -1,15 +1,14 @@
 // Copyright 2026 Fimbriata R&D Services, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-// App Store (StoreKit) subscriptions for the paid hosted tier — the Apple-side
-// twin of stripe.ts.
+// App Store (StoreKit) subscriptions for the paid hosted tier.
 //
 // Why this exists: Pro is a one-time on-device unlock and StoreKit settles it
 // entirely on the client. Pro+ is not. Its copilot runs here, and this Worker
 // will not answer without a bearer token it minted itself — a StoreKit receipt
 // means nothing to it. So an App Store subscription has to be exchanged for a
-// tenant token exactly the way a Stripe checkout is, or the purchase buys
-// nothing and App Review rejects it under 2.1.
+// tenant token, or the purchase buys nothing and App Review rejects it under
+// 2.1.
 //
 // The trust model is the whole point. The client sends a signed transaction; we
 // verify Apple's signature and certificate chain (appstore-jws.ts) and take
@@ -18,19 +17,18 @@
 // own plan could name itself Pro+ for free.
 //
 // The identity is keyed on Apple's originalTransactionId, stamped into the
-// existing subscription index with an `apple:` namespace so notifications can
-// find it through the same `_subscription` endpoint Stripe's webhook uses. One
-// subscription record shape, two payment providers.
+// registry's subscription index with an `apple:` namespace so notifications can
+// find it through the registry's `_subscription` endpoint.
 //
 // Nothing here is exercised against a live App Store account yet — the pure
 // helpers below are unit-tested, and the network paths need a sandbox purchase.
 
 import type { Env } from "./env.js";
 import { verifyAppleJWS, unsafeDecodeJWSPayload, AppleJWSError } from "./appstore-jws.js";
-import type { SubStatus } from "./stripe.js";
+import type { SubStatus } from "./entitlement.js";
 
-/** The plan ids we stamp on a subscriber record. Same vocabulary as Stripe's,
- *  deliberately: entitlement.ts and SessionDO must not care who took payment. */
+/** The plan ids we stamp on a subscriber record: entitlement.ts and SessionDO
+ *  must not care who took payment. */
 export type ApplePlanId = "monthly" | "annual";
 
 export function allowedBundleIds(env: Env): string[] {
@@ -53,8 +51,8 @@ export function planForProductId(productId: string | undefined): ApplePlanId | u
 /**
  * Apple's notification vocabulary collapsed to our three states.
  *
- * The mapping is deliberately conservative in the user's favour, matching
- * Stripe's: a failed renewal is `past_due` (which entitlement.ts still treats
+ * The mapping is deliberately conservative in the user's favour: a failed
+ * renewal is `past_due` (which entitlement.ts still treats
  * as entitled — dunning grace, not a lockout), and only a real ending is
  * `canceled`. DID_CHANGE_RENEWAL_STATUS is NOT a cancellation: auto-renew off
  * means the subscription still runs to the end of its paid period, and
@@ -143,9 +141,9 @@ export function isSandboxEnvironment(environment: string | undefined): boolean {
 }
 
 /**
- * The namespaced subscription id. Shares the registry's existing
- * `user-subscription:` index with Stripe — the index value is just a label,
- * and namespacing keeps the two providers from ever colliding.
+ * The namespaced subscription id, as stored in the registry's
+ * `user-subscription:` index. The `apple:` namespace keeps it apart from any
+ * other id that index might ever hold.
  *
  * Sandbox gets its own second namespace, and that is the whole reason
  * accepting sandbox receipts is safe. Apple stamps every TestFlight purchase
@@ -328,10 +326,9 @@ export async function handleAppStoreLink(request: Request, env: Env): Promise<Re
 /**
  * POST /appstore/notifications — Apple's App Store Server Notifications V2.
  *
- * Same discipline as the Stripe webhook: the signature is the authentication,
- * unknown types are acked, and a write failure returns 500 so Apple retries.
- * Status changes route through the SAME registry `_subscription` endpoint
- * Stripe uses, keyed on the namespaced subscription id.
+ * The signature is the authentication, unknown types are acked, and a write
+ * failure returns 500 so Apple retries. Status changes route through the
+ * registry's `_subscription` endpoint, keyed on the namespaced subscription id.
  */
 export async function handleAppStoreNotifications(request: Request, env: Env): Promise<Response> {
   const body = (await request.json().catch(() => null)) as { signedPayload?: string } | null;
@@ -399,8 +396,7 @@ export async function handleAppStoreNotifications(request: Request, env: Env): P
     if (!write.ok) throw new Error(`registry subscription write failed: ${write.status}`);
     return new Response("ok");
   } catch (err) {
-    // Mirror the Stripe webhook exactly: log the message, never the payload,
-    // and 500 so the provider redelivers. The registry write is idempotent.
+    // Log the message, never the payload, and 500 so Apple redelivers. The registry write is idempotent.
     console.error("appstore notification handling failed:", err instanceof Error ? err.message : "unknown");
     return new Response("error", { status: 500 });
   }

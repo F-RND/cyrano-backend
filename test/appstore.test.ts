@@ -148,7 +148,7 @@ describe("notificationTransactionIsOurs", () => {
 });
 
 describe("appleSubscriptionId / appleUserLabel", () => {
-  it("namespaces so Apple and Stripe ids can never collide in one index", () => {
+  it("namespaces so an Apple id can never collide with another in one index", () => {
     expect(appleSubscriptionId("2000000012345", "Production")).toBe("apple:2000000012345");
     expect(appleUserLabel("2000000012345", "Production")).toBe("apple_2000000012345");
   });
