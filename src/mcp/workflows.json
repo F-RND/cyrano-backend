@@ -1,7 +1,7 @@
 {
   "about": "The one source of Cyrano's workflow directive text (docs/PLAN-EDU.md, Phase 3). The remote MCP server (src/chatgpt-mcp.ts) renders from this file; the app's local catalog (apple/Shared/MCP/MCPCatalog.swift, MCPWorkflowText) carries the same strings and a test in the app compares them with this file. Placeholders: {{angle}} is ' Focus especially on: <focus>.' or empty; {{about}} is ' I'm about to deal with: <focus>. Prioritize anything related.' or empty; {{focus}} is the caller's focus or the workflow's default_focus. A workflow with 'local' and 'remote' variants differs only where the two surfaces' tools differ.",
   "version": 1,
-  "names": ["review", "catch_me_up", "to_requirements", "follow_ups", "prep", "watch_notes", "listen", "study_guide", "flashcards", "quiz", "lecture_recap"],
+  "names": ["review", "catch_me_up", "to_requirements", "follow_ups", "prep", "artifact", "watch_notes", "listen", "study_guide", "flashcards", "quiz", "lecture_recap"],
   "workflows": {
     "review": {
       "task": "Review this for gaps, risks, contradictions, and unanswered asks. Be specific and quote the lines you're reacting to. Prefer a short list of real issues over a summary.{{angle}}"
@@ -18,6 +18,9 @@
     "prep": {
       "local": { "task": "Prep me for what's next. From today's context, pull out: commitments I still owe, asks I haven't answered, and threads worth picking back up. Short bullets, most urgent first.{{about}}" },
       "remote": { "task": "Prep me for what's next. From this context, pull out: commitments I still owe, asks I haven't answered, and threads worth picking back up. Short bullets, most urgent first.{{about}}" }
+    },
+    "artifact": {
+      "task": "Build this into a share-ready artifact — a slide deck, one-pager, or written doc — using whatever artifact or document tooling you have. Ask which style if I haven't said. Ground it in this session: real points, quotes, decisions, and open questions, not invented ones — say plainly if there isn't enough material for a section instead of padding it.{{angle}}"
     },
     "watch_notes": {
       "default_focus": "anything worth remembering — a decision, a task, a name, a number, or something the user says they'll do",

@@ -229,6 +229,7 @@ describe("Connector generalization", () => {
       "to_requirements",
       "follow_ups",
       "prep",
+      "artifact",
       "watch_notes",
       "listen",
       "study_guide",
