@@ -33,7 +33,7 @@
     "wrangler": "^4.149.0"
   },
   "dependencies": {
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "overrides": {
     "sharp": "0.35.5",
