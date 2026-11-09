@@ -110,6 +110,13 @@ describe("price table — every listed rate is finite, cited, and the candidates
       expect(Number.isFinite(m.cache_write_multiplier) && m.cache_write_multiplier >= 0, where).toBe(true);
       expect(m.basis === "exact" || m.basis === "configured", where).toBe(true);
       expect(m.source.length, where).toBeGreaterThan(20);
+      if (m.long_prompt) {
+        // A prompt-length tier is a real step up: finite, past zero tokens, and
+        // never cheaper than the base it replaces.
+        expect(Number.isFinite(m.long_prompt.over_tokens) && m.long_prompt.over_tokens > 0, where).toBe(true);
+        expect(m.long_prompt.input_per_m, where).toBeGreaterThanOrEqual(m.input_per_m);
+        expect(m.long_prompt.output_per_m, where).toBeGreaterThanOrEqual(m.output_per_m);
+      }
     }
   });
 

@@ -79,6 +79,15 @@ export interface TokenRate {
   cacheWriteMultiplier: number;
   /** x inputPerM for cache_read_input_tokens. */
   cacheReadMultiplier: number;
+  /**
+   * A model that prices by prompt length (Claude Haiku 5.5): a request whose
+   * prompt is OVER `overTokens` pays `inputPerM` / `outputPerM` below instead of
+   * the base pair, and ONLY those two change — the cache multipliers above apply
+   * in both tiers. "Prompt length" is every input token of that one request,
+   * cache reads and writes included, so a request over the line pays the higher
+   * price even when most of it is a cache hit. Absent on every other model.
+   */
+  longPrompt?: { overTokens: number; inputPerM: number; outputPerM: number };
 }
 
 /**
@@ -232,7 +241,7 @@ const RATE_CARDS: Record<BillingProvider, RateCard> = {
     // (shared model table, cached 2026-06-24): haiku-4-5 $1/$5, sonnet-5 $3/$15,
     // opus-4-8 $5/$25 per 1M tokens. Cache ratios are Anthropic's published
     // 5-minute-TTL ones (write 1.25x input, read 0.1x input) — see
-    // ANTHROPIC_CACHE. These three are `exact`: a published number, a named
+    // ANTHROPIC_CACHE. Every entry here is `exact`: a published number, a named
     // source, and a date.
     models: {
       "claude-haiku-4-5": {
@@ -254,6 +263,24 @@ const RATE_CARDS: Record<BillingProvider, RateCard> = {
         rate: { inputPerM: 5, outputPerM: 25, ...ANTHROPIC_CACHE },
         basis: "exact",
         source: "Anthropic published list price $5/$25 per 1M (verified 2026-08-19)",
+      },
+      // Claude Haiku 5.5 — the hosted paid model (HOSTED_PAID_MODEL) since
+      // 2026-10-27. Priced by prompt length: $0.10/$0.50 per 1M for a request
+      // whose prompt is up to 100,000 tokens, $0.50/$2.50 above it. Cache write
+      // is 1.25x and cache read 0.1x of that tier's input price (the 5-minute
+      // TTL; $0.125 / $0.01 and $0.625 / $0.05 on the published page), so the
+      // shared ANTHROPIC_CACHE ratios hold in both tiers. Before this entry the
+      // model priced `estimated` at the Sonnet ESTIMATE_RATE, 30x too high.
+      "claude-haiku-5-5": {
+        rate: {
+          inputPerM: 0.1,
+          outputPerM: 0.5,
+          ...ANTHROPIC_CACHE,
+          longPrompt: { overTokens: 100_000, inputPerM: 0.5, outputPerM: 2.5 },
+        },
+        basis: "exact",
+        source:
+          "Anthropic published list price $0.10/$0.50 per 1M for prompts up to 100K tokens, $0.50/$2.50 above (platform.claude.com/docs/en/about-claude/pricing, verified 2026-11-09)",
       },
     },
   },
@@ -452,10 +479,18 @@ export function priceUsageWithRate(
     cache_creation_input_tokens: cacheWrite,
     cache_read_input_tokens: cacheRead,
   };
+  // Each request is priced on its own: the tier is read off THIS request's
+  // prompt length (fresh input + cache writes + cache reads), never an average
+  // or a running total. Exactly `overTokens` is still the lower tier ("up to").
+  const long = rate.longPrompt;
+  const tier =
+    long && input + cacheWrite + cacheRead > long.overTokens
+      ? { inputPerM: long.inputPerM, outputPerM: long.outputPerM }
+      : rate;
   let micros = usageMicrosAt(
     clean,
-    rate.inputPerM,
-    rate.outputPerM,
+    tier.inputPerM,
+    tier.outputPerM,
     rate.cacheWriteMultiplier,
     rate.cacheReadMultiplier,
   );
@@ -544,6 +579,9 @@ export interface PriceTableEntry {
   cache_read_multiplier: number;
   basis: "exact" | "configured";
   source: string;
+  /** Present only for a model priced by prompt length: what a request whose
+   * prompt is over `over_tokens` pays instead of input_per_m / output_per_m. */
+  long_prompt?: { over_tokens: number; input_per_m: number; output_per_m: number };
 }
 
 /**
@@ -578,6 +616,13 @@ export function priceTable(): {
         cache_read_multiplier: listed.rate.cacheReadMultiplier,
         basis: listed.basis,
         source: listed.source,
+        ...(listed.rate.longPrompt && {
+          long_prompt: {
+            over_tokens: listed.rate.longPrompt.overTokens,
+            input_per_m: listed.rate.longPrompt.inputPerM,
+            output_per_m: listed.rate.longPrompt.outputPerM,
+          },
+        }),
       });
     }
   }

@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import {
   ESTIMATE_RATE,
   billingProviderFor,
+  priceTable,
   priceUsage,
   pricingOptionsFromEnv,
   rateFor,
@@ -547,5 +548,95 @@ describe("an unrecognised provider or basis degrades, never throws and never fab
     expect(view.spendMicros).toBe(1000);
     expect(view.exactFraction).toBe(1);
     expect(view.attributedMicros).toBeLessThan(view.spendMicros);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Claude Haiku 5.5 — priced by prompt length
+// ---------------------------------------------------------------------------
+//
+// Anthropic's published page (platform.claude.com/docs/en/about-claude/pricing,
+// read 2026-11-09) lists Haiku 5.5 twice: a request whose PROMPT is up to
+// 100,000 tokens pays $0.10 in / $0.50 out, cache write $0.125, cache read
+// $0.01; a request over 100,000 pays $0.50 / $2.50, write $0.625, read $0.05.
+// "Prompt" counts every input token of that one request, cache reads and
+// writes included. Before the card existed this model priced `estimated` at the
+// Sonnet $3/$15. Micro-dollars below are derived by hand: $/1M is micro-$/token.
+
+describe("claude-haiku-5-5 — the long-prompt tier", () => {
+  const price = (usage: Partial<LlmUsage>) =>
+    priceUsage({ ...ZERO, ...usage }, { provider: "anthropic", model: "claude-haiku-5-5", baseUrl: "https://api.anthropic.com/v1" });
+
+  it("is a published, exact price, no longer the Sonnet estimate", () => {
+    expect(rateFor("anthropic", "claude-haiku-5-5").basis).toBe("exact");
+    // 1,000 in + 200 out = 0.10 * 1000 + 0.50 * 200 = 100 + 100.
+    const priced = price({ input_tokens: 1_000, output_tokens: 200 });
+    expect(priced.micros).toBe(200);
+    expect(priced.basis).toBe("exact");
+  });
+
+  it("prices a prompt of exactly 100,000 tokens in the lower tier, and 100,002 in the higher", () => {
+    // "up to 100,000": 0.10 * 100000 + 0.50 * 1000 = 10000 + 500.
+    expect(price({ input_tokens: 100_000, output_tokens: 1_000 }).micros).toBe(10_500);
+    // over: 0.50 * 100002 + 2.50 * 1000 = 50001 + 2500.
+    expect(price({ input_tokens: 100_002, output_tokens: 1_000 }).micros).toBe(52_501);
+  });
+
+  it("counts cache reads toward the prompt length, so a cache-heavy request over the line pays the higher rates", () => {
+    // 2,000 fresh + 99,000 cache read = 101,000 > 100,000 → higher tier:
+    // 0.50 * 2000 + (0.1 * 0.50) * 99000 + 2.50 * 1000 = 1000 + 4950 + 2500.
+    expect(price({ input_tokens: 2_000, cache_read_input_tokens: 99_000, output_tokens: 1_000 }).micros).toBe(8_450);
+  });
+
+  it("applies the 1.25x cache-write ratio to the higher tier's input price", () => {
+    // 1,000 fresh + 100,000 written = 101,000 > 100,000:
+    // 0.50 * 1000 + (1.25 * 0.50) * 100000 = 500 + 62500.
+    expect(price({ input_tokens: 1_000, cache_creation_input_tokens: 100_000 }).micros).toBe(63_000);
+  });
+
+  it("applies the cache ratios to the lower tier's input price", () => {
+    // 1,000 fresh + 50,000 read + 10,000 written + 100 out, all under the line:
+    // 0.10*1000 + (0.1*0.10)*50000 + (1.25*0.10)*10000 + 0.50*100 = 100 + 500 + 1250 + 50.
+    expect(
+      price({ input_tokens: 1_000, cache_read_input_tokens: 50_000, cache_creation_input_tokens: 10_000, output_tokens: 100 }).micros,
+    ).toBe(1_900);
+  });
+
+  it("prices each request on its own length and reports the whole prompt as input tokens", () => {
+    const small = price({ input_tokens: 10_000, output_tokens: 100 });
+    const big = price({ input_tokens: 10_000, cache_read_input_tokens: 95_000, output_tokens: 100 });
+    expect(small.micros).toBe(1_050); // 0.10 * 10000 + 0.50 * 100
+    expect(big.inputTokens).toBe(105_000);
+    // 0.50*10000 + 0.05*95000 + 2.50*100 = 5000 + 4750 + 250.
+    expect(big.micros).toBe(10_000);
+  });
+
+  it("leaves every other model's rate untouched", () => {
+    expect(rateFor("anthropic", "claude-haiku-4-5").rate).toEqual({
+      inputPerM: 1,
+      outputPerM: 5,
+      cacheWriteMultiplier: 1.25,
+      cacheReadMultiplier: 0.1,
+    });
+    // 150,000-token prompt on Haiku 4.5 is one flat rate: 1 * 150000 + 5 * 100.
+    const flat = priceUsage(
+      { ...ZERO, input_tokens: 150_000, output_tokens: 100 },
+      { provider: "anthropic", model: "claude-haiku-4-5", baseUrl: "https://api.anthropic.com/v1" },
+    );
+    expect(flat.micros).toBe(150_500);
+  });
+
+  it("shows the tier in the operator's rate table, and only on the model that has one", () => {
+    const rows = priceTable().models;
+    const haiku = rows.find((m) => m.provider === "anthropic" && m.model === "claude-haiku-5-5");
+    expect(haiku).toMatchObject({
+      input_per_m: 0.1,
+      output_per_m: 0.5,
+      cache_write_multiplier: 1.25,
+      cache_read_multiplier: 0.1,
+      basis: "exact",
+      long_prompt: { over_tokens: 100_000, input_per_m: 0.5, output_per_m: 2.5 },
+    });
+    expect(rows.filter((m) => m.long_prompt).map((m) => m.model)).toEqual(["claude-haiku-5-5"]);
   });
 });
