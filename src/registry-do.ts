@@ -176,7 +176,23 @@ interface StoredUser {
   // Present → entitlement gates on it; absent →
   // a normal (subscription- or operator-minted) tenant. See promo.ts / entitlement.ts.
   promoExpiresAt?: number;
+  // App Store tenants only: the hashes of this tenant's OTHER live tokens,
+  // newest first. `hash` is always the newest; each entry here has its own
+  // `user-hash:` index pointing at the same label. One Apple ID links from
+  // every device it owns, each device keeps the token it was handed, so a
+  // relink adds a token rather than replacing the only one (appStoreLink).
+  // Absent on every record written before 2026-11 and on every non-App-Store
+  // identity, and absent reads as "no other tokens" — no migration.
+  deviceHashes?: string[];
 }
+
+// How many live tokens one App Store tenant may hold at once (`hash` plus
+// `deviceHashes`). Every device on the Apple ID relinks on purchase, restore,
+// a launch with no token, and each renewal it sees, so this has to clear the
+// devices one person owns several renewals over; past it the oldest token is
+// evicted, which bounds both storage and how long a leaked token outlives
+// later links.
+const APPSTORE_TOKENS_PER_TENANT = 10;
 
 const USER_PREFIX = "user:";
 const USER_ID_INDEX_PREFIX = "user-id:";
@@ -1086,6 +1102,8 @@ export class RegistryDO implements DurableObject {
       this.ctx.storage.delete(RegistryDO.userKey(label)),
       this.ctx.storage.delete(`${USER_ID_INDEX_PREFIX}${user.userId}`),
       this.ctx.storage.delete(`${USER_HASH_INDEX_PREFIX}${user.hash}`),
+      // An App Store tenant's other devices' tokens die with it too.
+      ...(user.deviceHashes ?? []).map((h) => this.ctx.storage.delete(`${USER_HASH_INDEX_PREFIX}${h}`)),
     ];
     if (user.stripeSubscriptionId) {
       deletes.push(this.ctx.storage.delete(`${USER_SUBSCRIPTION_INDEX_PREFIX}${user.stripeSubscriptionId}`));
@@ -1577,11 +1595,24 @@ export class RegistryDO implements DurableObject {
   /**
    * Exchange a verified App Store subscription for a tenant token.
    *
-   * Structurally `relayTokenForLicense`: the token comes back on every
-   * request, not only on first mint. The client asks for this directly after purchase, after a restore on
-   * a second device, and after every renewal — and each of those needs a usable
-   * token in the response. So this ROTATES on re-request, like the relay path,
-   * and the old secret dies with it.
+   * The token comes back on every request, not only on first mint. The client
+   * asks for this directly after purchase, after a restore on a second device,
+   * on a launch that finds no token, and after every renewal — and each of
+   * those needs a usable token in the response. Only the token's hash is
+   * stored, so the existing token cannot be handed back: every link mints a
+   * new one.
+   *
+   * What a relink must NOT do is kill the tokens it did not mint. One Apple ID
+   * is many devices, and each device keeps the token its own link returned,
+   * so a relink ADDS a token: the previous newest moves into `deviceHashes`
+   * and keeps resolving, up to APPSTORE_TOKENS_PER_TENANT live tokens, past
+   * which the oldest is evicted. (This used to rotate like the relay path,
+   * which is right for a license bound to one device and wrong here: a
+   * restore or renewal on one iPhone signed out every other device on the
+   * account, and each one's re-provision signed out the first, forever.)
+   * All of a tenant's tokens resolve to the same label and `userId`, so
+   * usage and entitlement stay per tenant, never per device. Revocation:
+   * the cap evicts the oldest; `DELETE /users/:label` kills every token.
    *
    * The caller has already verified Apple's signature (appstore.ts). Nothing
    * here re-checks entitlement: by the time it runs, the transaction is proven.
@@ -1598,9 +1629,9 @@ export class RegistryDO implements DurableObject {
    * at zero by the cost report instead of at the plan's list price. Sandbox
    * transaction ids are also minted from a different sequence to production
    * ones and nothing promises the two never coincide, which matters more here
-   * than anywhere else because this route ROTATES: an unnamespaced collision
-   * would hand a paying customer's tenant a new token and 401 every device
-   * they own.
+   * than anywhere else because a link writes the tenant's plan, status and
+   * paid-through date and pushes its oldest token out: an unnamespaced
+   * collision would let a free sandbox purchase do both to a paying customer.
    */
   private async appStoreLink(request: Request): Promise<Response> {
     const b = (await request.json().catch(() => ({}))) as {
@@ -1630,10 +1661,16 @@ export class RegistryDO implements DurableObject {
 
     const result = await this.ctx.storage.transaction(async (txn) => {
       const existing = await txn.get<StoredUser>(RegistryDO.userKey(label));
+      // Every token this tenant already holds stays live, newest first, up to
+      // the cap (less one for the token being minted now); the rest are evicted.
+      const live = existing ? [existing.hash, ...(existing.deviceHashes ?? [])] : [];
+      const kept = live.slice(0, APPSTORE_TOKENS_PER_TENANT - 1);
+      const evicted = live.slice(APPSTORE_TOKENS_PER_TENANT - 1);
       const user: StoredUser = existing
         ? {
             ...existing,
             hash: tokenHash,
+            deviceHashes: kept,
             plan: b.plan ?? existing.plan,
             subStatus: b.sub_status ?? existing.subStatus,
             stripeSubscriptionId: subscriptionId,
@@ -1657,16 +1694,26 @@ export class RegistryDO implements DurableObject {
             usage: b.period_start ? RegistryDO.alignedUsage(undefined, b.period_start) : undefined,
           };
 
-      // Rotation kills the old secret before the new one is indexed.
-      if (existing) await txn.delete(`${USER_HASH_INDEX_PREFIX}${existing.hash}`);
+      // Only tokens past the cap die; the other devices' tokens keep their
+      // index entries untouched.
+      for (const hash of evicted) await txn.delete(`${USER_HASH_INDEX_PREFIX}${hash}`);
       await txn.put(RegistryDO.userKey(label), user);
       await txn.put(`${USER_ID_INDEX_PREFIX}${user.userId}`, label);
       await txn.put(`${USER_HASH_INDEX_PREFIX}${user.hash}`, label);
       await txn.put(`${USER_SUBSCRIPTION_INDEX_PREFIX}${subscriptionId}`, label);
-      return { userId: user.userId, rotated: Boolean(existing) } as const;
+      return {
+        userId: user.userId,
+        relinked: Boolean(existing),
+        activeTokens: 1 + (user.deviceHashes?.length ?? 0),
+      } as const;
     });
 
-    return Response.json({ token, user_id: result.userId, rotated: result.rotated });
+    return Response.json({
+      token,
+      user_id: result.userId,
+      relinked: result.relinked,
+      active_tokens: result.activeTokens,
+    });
   }
 
   private async relayTokenForLicense(request: Request): Promise<Response> {

@@ -152,9 +152,10 @@ export function isSandboxEnvironment(environment: string | undefined): boolean {
  * unlocks nothing. But sandbox transactions are also free and unlimited to
  * anyone who can run a build under our App Store Connect record, so they must
  * never land on the same identity as a paying subscriber's: a sandbox relink
- * would otherwise rotate a real customer's token, and a sandbox tenant would
- * be counted as revenue. Separate namespace, separate record, separate row in
- * the cost report (costs.ts prices `apple-sandbox` at zero).
+ * would otherwise rewrite a real customer's plan and evict their oldest token,
+ * and a sandbox tenant would be counted as revenue. Separate namespace,
+ * separate record, separate row in the cost report (costs.ts prices
+ * `apple-sandbox` at zero).
  */
 export function appleSubscriptionId(originalTransactionId: string, environment: string): string {
   return isSandboxEnvironment(environment)
@@ -297,7 +298,7 @@ export async function handleAppStoreLink(request: Request, env: Env): Promise<Re
     body: JSON.stringify({
       original_transaction_id: verdict.originalTransactionId,
       // Namespaces the identity. A sandbox purchase gets its own record so it
-      // can never rotate a paying subscriber's token or be counted as revenue.
+      // can never touch a paying subscriber's tokens or be counted as revenue.
       environment: verdict.environment,
       plan: verdict.plan,
       sub_status: verdict.subStatus,
