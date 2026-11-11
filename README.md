@@ -189,6 +189,10 @@ Only meaningful when sessions have an owning user (an App Store subscription or 
 | `BUG_REPORT_NOTIFY_URL` | var | — | `https://` URL that receives the relay. Plain `http://` is refused. |
 | `BUG_REPORT_NOTIFY_TOKEN` | secret | — | Sent as `Authorization: Bearer …` so the receiver can refuse anyone else. |
 
+### Terms of Use acceptances
+
+The apps open on a click-through Terms of Use gate. When a user agrees, the app sends `POST /terms/accept` (token-less, like `/bug-report`) with a random per-install id, the revision accepted, the device's acceptance time, platform, channel (`app_store`, `mac_app_store` or `developer_id`) and app version; the Developer ID Mac build adds its hardware fingerprint, stored only as the same SHA-256 the trial record is keyed by. The first acceptance of a revision per install is kept and never overwritten; no IP address is stored (it is only hashed into a daily rate-limit bucket). The operator reads them with `GET /terms-acceptances` (`?install_id=`, `?fingerprint_hash=`, `?limit=`). No configuration.
+
 ### Shadow price testing (optional, off by default)
 
 Fans each hosted analysis window out to additional providers on the operator's keys for measurement. Adds egress and spend; leave disabled unless deliberately evaluating providers with synthetic data.

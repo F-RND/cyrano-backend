@@ -61,6 +61,18 @@ import {
   summarizeSessionCosts,
   type SessionCostRow,
 } from "./session-cost.js";
+import {
+  MAX_TERMS_BODY_BYTES,
+  sanitizeTermsAcceptance,
+  TERMS_PREFIX,
+  TERMS_RATE_LIMIT_PER_DAY,
+  TERMS_RATE_LIMIT_PREFIX,
+  termsAcceptanceKey,
+  termsFingerprintFilter,
+  termsInstallFilter,
+  termsRateLimitKey,
+  type StoredTermsAcceptance,
+} from "./terms.js";
 import type { Env } from "./env.js";
 
 interface StoredKey {
@@ -506,6 +518,15 @@ export class RegistryDO implements DurableObject {
     if (request.method === "DELETE" && url.pathname.startsWith("/_bugreport/")) {
       const id = decodeURIComponent(url.pathname.slice("/_bugreport/".length));
       return this.deleteBugReport(id);
+    }
+    // Terms of Use acceptance records (terms.ts). Internal-only, reached via
+    // the Worker's token-less POST /terms/accept and operator-only GET
+    // /terms-acceptances.
+    if (request.method === "POST" && url.pathname === "/_terms") {
+      return this.submitTermsAcceptance(request);
+    }
+    if (request.method === "GET" && url.pathname === "/_terms") {
+      return this.listTermsAcceptances(url);
     }
 
     return new Response("not found", { status: 404 });
@@ -2237,6 +2258,91 @@ export class RegistryDO implements DurableObject {
       limit,
     });
     return Response.json({ reports: [...stored.values()] });
+  }
+
+  // ---- Terms of Use acceptances (first-open gate; terms.ts) ----
+
+  private async submitTermsAcceptance(request: Request): Promise<Response> {
+    const raw = await request.text();
+    if (raw.length > MAX_TERMS_BODY_BYTES) {
+      return Response.json({ error: "too_large" }, { status: 413 });
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return Response.json({ error: "bad_request" }, { status: 400 });
+    }
+    const now = Date.now();
+    const acceptance = sanitizeTermsAcceptance(parsed, now);
+    if (!acceptance) {
+      return Response.json({ error: "bad_request" }, { status: 400 });
+    }
+
+    // First acceptance of a revision stands: its date starts the arbitration
+    // opt-out window. A retry (the app re-sends until it sees a 2xx) is
+    // acknowledged without touching the record or the rate-limit counter.
+    const key = termsAcceptanceKey(acceptance.install_id, acceptance.terms_version);
+    if (await this.ctx.storage.get(key)) {
+      return Response.json({ ok: true, recorded: false });
+    }
+
+    // Per-client daily cap, IP hashed into today's bucket only (bug-report
+    // scheme): the stored record never carries the address.
+    const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+    const clientHash = (await sha256Hex(ip)).slice(0, 16);
+    const rlKey = termsRateLimitKey(clientHash, now);
+    const count = (await this.ctx.storage.get<number>(rlKey)) ?? 0;
+    if (count >= TERMS_RATE_LIMIT_PER_DAY) {
+      return Response.json({ error: "rate_limited" }, { status: 429 });
+    }
+    await this.ctx.storage.put(rlKey, count + 1);
+    const todayPrefix = termsRateLimitKey("", now);
+    const buckets = await this.ctx.storage.list({ prefix: TERMS_RATE_LIMIT_PREFIX });
+    const stale = [...buckets.keys()].filter((bucket) => !bucket.startsWith(todayPrefix));
+    for (let i = 0; i < stale.length; i += 128) {
+      await this.ctx.storage.delete(stale.slice(i, i + 128));
+    }
+
+    const stored: StoredTermsAcceptance = {
+      install_id: acceptance.install_id,
+      terms_version: acceptance.terms_version,
+      accepted_at_ms: acceptance.accepted_at_ms,
+      received_at_ms: now,
+      platform: acceptance.platform,
+      channel: acceptance.channel,
+      app_version: acceptance.app_version,
+      debug: acceptance.debug,
+      // Same derivation as the trial key (`trial:<sha256(fingerprint)>`).
+      fingerprint_hash: acceptance.fingerprint ? await sha256Hex(acceptance.fingerprint) : null,
+    };
+    await this.ctx.storage.put(key, stored);
+    return Response.json({ ok: true, recorded: true });
+  }
+
+  /** Operator read. `?install_id=` lists one install's acceptances;
+   *  `?fingerprint_hash=` finds a Developer ID Mac's (the hash its trial is
+   *  keyed by); neither lists up to `limit` records (default 200, max 1000). */
+  private async listTermsAcceptances(url: URL): Promise<Response> {
+    const installParam = url.searchParams.get("install_id");
+    const fingerprintParam = url.searchParams.get("fingerprint_hash");
+    const installId = termsInstallFilter(installParam);
+    const fingerprintHash = termsFingerprintFilter(fingerprintParam);
+    if ((installParam && !installId) || (fingerprintParam && !fingerprintHash)) {
+      return Response.json({ error: "bad_request" }, { status: 400 });
+    }
+    const limitParam = Number(url.searchParams.get("limit"));
+    const limit =
+      Number.isFinite(limitParam) && limitParam > 0 ? Math.min(Math.floor(limitParam), 1000) : 200;
+
+    const prefix = installId ? `${TERMS_PREFIX}${installId}:` : TERMS_PREFIX;
+    const rows = await this.ctx.storage.list<StoredTermsAcceptance>({ prefix });
+    let acceptances = [...rows.values()];
+    if (fingerprintHash) {
+      acceptances = acceptances.filter((row) => row.fingerprint_hash === fingerprintHash);
+    }
+    acceptances.sort((a, b) => b.received_at_ms - a.received_at_ms);
+    return Response.json({ acceptances: acceptances.slice(0, limit), total: acceptances.length });
   }
 
   private async deleteBugReport(id: string): Promise<Response> {

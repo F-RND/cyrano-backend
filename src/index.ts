@@ -287,6 +287,15 @@ export default {
       return registry.fetch(new Request("https://registry/_bugreport", request));
     }
 
+    // Terms of Use acceptance (backend/src/terms.ts). Token-less like
+    // /bug-report: the apps' first-open gate comes before any plan or
+    // credential, and a record grants nothing. Shape clamps live in terms.ts;
+    // the per-IP daily cap lives in the registry.
+    if (request.method === "POST" && url.pathname === "/terms/accept") {
+      const registry = env.REGISTRY_DO.get(env.REGISTRY_DO.idFromName("registry"));
+      return registry.fetch(new Request("https://registry/_terms", request));
+    }
+
     // Agent-facing routes: a separate, revocable credential (not AUTH_TOKEN,
     // not a tenant's own bearer token) — see RegistryDO / DECISIONS.md for
     // why the integration is pull-then-push rather than Cyrano calling an
@@ -875,6 +884,17 @@ export default {
         });
       }
       return new Response("not found", { status: 404 });
+    }
+
+    // Terms of Use acceptances (operator-only): the server's copy of who
+    // agreed to which revision, and when. `?install_id=` or
+    // `?fingerprint_hash=` narrows it; `?limit=` caps it.
+    if (request.method === "GET" && url.pathname === "/terms-acceptances") {
+      if (identity.kind !== "operator") {
+        return new Response("forbidden", { status: 403 });
+      }
+      const registry = env.REGISTRY_DO.get(env.REGISTRY_DO.idFromName("registry"));
+      return registry.fetch(`https://registry/_terms${url.search}`);
     }
 
     // Release adoption (operator-only, backend/src/adoption.ts): how many
