@@ -187,12 +187,21 @@ interface StoredUser {
 }
 
 // How many live tokens one App Store tenant may hold at once (`hash` plus
-// `deviceHashes`). Every device on the Apple ID relinks on purchase, restore,
-// a launch with no token, and each renewal it sees, so this has to clear the
-// devices one person owns several renewals over; past it the oldest token is
-// evicted, which bounds both storage and how long a leaked token outlives
-// later links.
-const APPSTORE_TOKENS_PER_TENANT = 10;
+// `deviceHashes`). Past it the oldest token is evicted, which bounds storage
+// and how long a leaked token outlives later links.
+//
+// It has to clear what one person accumulates BETWEEN launches, not just the
+// devices they own: every device on the Apple ID relinks on purchase, restore,
+// a launch with no token, and each renewal it sees, and a device that comes
+// back after missing several monthly renewals may relink once per queued
+// renewal, each one taking a slot. Eviction is also not self-healing yet: the
+// app relinks only when its stored token is EMPTY, so a device whose token
+// was evicted keeps presenting a dead one and recovers only via a queued
+// renewal or the user tapping Restore (until the app relinks on a 401).
+// Three or four devices times a handful of missed renewals clears 10 easily,
+// and an index row is a hash and a label, so the cap is generous rather
+// than tight.
+const APPSTORE_TOKENS_PER_TENANT = 30;
 
 const USER_PREFIX = "user:";
 const USER_ID_INDEX_PREFIX = "user-id:";
@@ -1324,6 +1333,25 @@ export class RegistryDO implements DurableObject {
     };
   }
 
+  /** alignedUsage, but only when `periodStartMs` opens a billing period the
+   * meter has not seen yet. A link or notification that carries the period
+   * the meter is already in, or an older one, leaves the meter alone.
+   *
+   * Both callers send the transaction's purchaseDate on EVERY call, and both
+   * run far more often than renewals do: every device on the Apple ID relinks
+   * on a launch with no token and on each renewal it sees, so a phone coming
+   * online mid-period would otherwise zero the spend the Mac has already run
+   * up, and Apple's notifications can arrive late or more than once. A signed
+   * transaction also verifies for as long as it is unexpired, so a subscriber
+   * replaying their own could reset their meter at will. Comparing periods
+   * closes all three: a real renewal's purchaseDate is newer than the period
+   * the meter is in, so renewals still reset; nothing else does. */
+  private static usageForPeriod(prev: UsageState | undefined, periodStartMs: number): UsageState {
+    if (!prev) return RegistryDO.alignedUsage(undefined, periodStartMs);
+    if (periodStartMs > prev.periodStart) return RegistryDO.alignedUsage(prev, periodStartMs);
+    return prev;
+  }
+
   /**
    * An App Store notification (appstore.ts): update an existing subscriber's
    * plan/status (degrade, never delete — the token
@@ -1355,7 +1383,7 @@ export class RegistryDO implements DurableObject {
       // forward is the whole point: entitlement.ts treats an `active` record
       // stuck behind its expiry as one nobody ever told us about.
       subExpiresAt: b.period_end ?? found.subExpiresAt,
-      usage: b.period_start ? RegistryDO.alignedUsage(found.usage, b.period_start) : found.usage,
+      usage: b.period_start ? RegistryDO.usageForPeriod(found.usage, b.period_start) : found.usage,
     });
     return Response.json({ found: true, user_id: found.userId });
   }
@@ -1679,7 +1707,7 @@ export class RegistryDO implements DurableObject {
             // assignment so a payload without one leaves the record alone.
             subExpiresAt: b.period_end ?? existing.subExpiresAt,
             usage: b.period_start
-              ? RegistryDO.alignedUsage(existing.usage, b.period_start)
+              ? RegistryDO.usageForPeriod(existing.usage, b.period_start)
               : existing.usage,
           }
         : {

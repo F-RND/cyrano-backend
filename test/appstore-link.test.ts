@@ -82,8 +82,44 @@ async function resolve(reg: RegistryDO, token: string): Promise<{ valid: boolean
   return (await res.json()) as { valid: boolean; userId?: string };
 }
 
-// Must match APPSTORE_TOKENS_PER_TENANT in registry-do.ts.
-const CAP = 10;
+// Must match APPSTORE_TOKENS_PER_TENANT in registry-do.ts. The eviction test
+// links CAP + 1 times; each link is one SHA-256 and a few map writes, so 31
+// is still well under a second.
+const CAP = 30;
+
+function subscription(body: unknown): Request {
+  return new Request("https://registry/_subscription", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+type StoredUsage = {
+  periodStart: number;
+  spendMicros: number;
+  lifetimeSpendMicros: number;
+  legs: unknown[];
+};
+
+function usageOf(storage: FakeStorage): StoredUsage | undefined {
+  return (storage.map.get(`user:${LABEL}`) as { usage?: StoredUsage }).usage;
+}
+
+/** Puts spend on the tenant's meter as a metered call would. */
+function spend(storage: FakeStorage, micros: number): void {
+  const user = storage.map.get(`user:${LABEL}`) as { usage: StoredUsage };
+  user.usage = {
+    ...user.usage,
+    spendMicros: user.usage.spendMicros + micros,
+    lifetimeSpendMicros: user.usage.lifetimeSpendMicros + micros,
+    legs: [{ provider: "anthropic", model: "m", micros }],
+  };
+}
+
+const PERIOD = Date.parse("2026-10-01T00:00:00Z");
+const NEXT_PERIOD = Date.parse("2026-11-01T00:00:00Z");
+const OLDER_PERIOD = Date.parse("2026-09-01T00:00:00Z");
 
 describe("registry _appstore_link", () => {
   it("mints a tenant token and indexes it for lookup", async () => {
@@ -257,5 +293,118 @@ describe("registry _appstore_link", () => {
     await reg.fetch(link({ original_transaction_id: "sub_123", plan: "monthly" }));
     expect(storage.map.get("user-subscription:apple:sub_123")).toBe("apple_sub_123");
     expect(storage.map.get("user-subscription:sub_123")).toBeUndefined();
+  });
+});
+
+// The Worker sends the transaction's purchaseDate as period_start on EVERY
+// link (appstore.ts), and relinks are routine: each device on the Apple ID,
+// each launch without a token, each renewal each device sees. Only a newer
+// billing period may reset the meter; otherwise a second device coming online
+// mid-period zeroes the tenant's spend, and so could a subscriber replaying
+// their own signed transaction.
+describe("registry _appstore_link usage period", () => {
+  it("gives a fresh tenant a meter aligned to the billing period", async () => {
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    expect(usageOf(storage)).toMatchObject({ periodStart: PERIOD, spendMicros: 0, lifetimeSpendMicros: 0 });
+  });
+
+  it("keeps spend when another device relinks with the same period", async () => {
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    spend(storage, 5_000_000);
+
+    const second = await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    expect(second.relinked).toBe(true);
+    expect(usageOf(storage)).toMatchObject({ periodStart: PERIOD, spendMicros: 5_000_000, lifetimeSpendMicros: 5_000_000 });
+    expect(usageOf(storage)?.legs).toHaveLength(1);
+  });
+
+  it("keeps spend when a relink carries an older period", async () => {
+    // A device replaying a stale transaction, or one that was offline over a
+    // renewal and links with what it last saw.
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    spend(storage, 5_000_000);
+
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: OLDER_PERIOD });
+    expect(usageOf(storage)).toMatchObject({ periodStart: PERIOD, spendMicros: 5_000_000 });
+  });
+
+  it("resets spend and keeps the lifetime total on a newer period", async () => {
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    spend(storage, 5_000_000);
+
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: NEXT_PERIOD });
+    expect(usageOf(storage)).toMatchObject({
+      periodStart: NEXT_PERIOD,
+      spendMicros: 0,
+      lifetimeSpendMicros: 5_000_000,
+      legs: [],
+    });
+  });
+
+  it("leaves the meter alone when the link carries no period", async () => {
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    spend(storage, 5_000_000);
+
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly" });
+    expect(usageOf(storage)).toMatchObject({ periodStart: PERIOD, spendMicros: 5_000_000 });
+  });
+});
+
+// The notification path writes through the same subscription index and used
+// to realign on every period_start too; a late or duplicated notification
+// must not zero a period that is already under way.
+describe("registry _subscription usage period", () => {
+  const SUB = `apple:${OTID}`;
+
+  async function notify(reg: RegistryDO, body: Record<string, unknown>) {
+    const res = await reg.fetch(subscription({ stripe_subscription_id: SUB, ...body }));
+    return (await res.json()) as { found: boolean };
+  }
+
+  it("keeps spend on a replayed notification for the current period", async () => {
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    spend(storage, 5_000_000);
+
+    expect(await notify(reg, { sub_status: "active", period_start: PERIOD })).toEqual(
+      expect.objectContaining({ found: true }),
+    );
+    expect(usageOf(storage)).toMatchObject({ periodStart: PERIOD, spendMicros: 5_000_000 });
+  });
+
+  it("keeps spend on a notification for an older period", async () => {
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    spend(storage, 5_000_000);
+
+    await notify(reg, { sub_status: "active", period_start: OLDER_PERIOD });
+    expect(usageOf(storage)).toMatchObject({ periodStart: PERIOD, spendMicros: 5_000_000 });
+  });
+
+  it("resets spend on a renewal and keeps the lifetime total", async () => {
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly", period_start: PERIOD });
+    spend(storage, 5_000_000);
+
+    await notify(reg, { sub_status: "active", period_start: NEXT_PERIOD, period_end: NEXT_PERIOD + 30 * 86_400_000 });
+    expect(usageOf(storage)).toMatchObject({
+      periodStart: NEXT_PERIOD,
+      spendMicros: 0,
+      lifetimeSpendMicros: 5_000_000,
+    });
+  });
+
+  it("aligns a tenant that has no meter yet", async () => {
+    const { registry: reg, storage } = registry();
+    await linkOnce(reg, { original_transaction_id: OTID, plan: "monthly" });
+    expect(usageOf(storage)).toBeUndefined();
+
+    await notify(reg, { sub_status: "active", period_start: PERIOD });
+    expect(usageOf(storage)).toMatchObject({ periodStart: PERIOD, spendMicros: 0 });
   });
 });
