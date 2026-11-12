@@ -67,6 +67,7 @@ import {
   sanitizeTermsAcceptance,
   TERMS_FINGERPRINT_INDEX_PREFIX,
   TERMS_GLOBAL_LIMIT_PER_DAY,
+  TERMS_LIST_MAX_PAGES,
   TERMS_GLOBAL_PREFIX,
   TERMS_PREFIX,
   TERMS_RATE_LIMIT_PER_DAY,
@@ -2335,7 +2336,7 @@ export class RegistryDO implements DurableObject {
         [termsTimeIndexKey(now, stored.install_id, stored.terms_version)]: key,
       };
       if (fingerprintHash) {
-        entries[termsFingerprintIndexKey(fingerprintHash, stored.terms_version)] = key;
+        entries[termsFingerprintIndexKey(fingerprintHash, stored.terms_version, stored.install_id)] = key;
       }
       await txn.put(entries);
       return "recorded" as const;
@@ -2380,8 +2381,12 @@ export class RegistryDO implements DurableObject {
    *  list on its records); `?fingerprint_hash=` finds a Developer ID Mac's
    *  through the `terms-fp:` index; neither walks the `terms-t:` index
    *  newest-first, up to `limit` (default 200, max 1000), never the whole
-   *  store. `?debug=true|false` narrows any of them. `total` is the number of
-   *  rows returned, not a count of every record held. */
+   *  store. `?debug=true|false` narrows any of them; on the unfiltered read
+   *  it pages the index backwards until `limit` matching rows are in hand or
+   *  TERMS_LIST_MAX_PAGES slices have been read, so a run of recent debug
+   *  rows cannot hide the production ones behind it (or vice versa) without
+   *  the scan ever becoming unbounded. `total` is the number of rows
+   *  returned, not a count of every record held. */
   private async listTermsAcceptances(url: URL): Promise<Response> {
     const installParam = url.searchParams.get("install_id");
     const fingerprintParam = url.searchParams.get("fingerprint_hash");
@@ -2407,8 +2412,25 @@ export class RegistryDO implements DurableObject {
         (a, b) => b.received_at_ms - a.received_at_ms,
       );
     } else {
-      const index = await this.ctx.storage.list<string>({ prefix: TERMS_TIME_INDEX_PREFIX, reverse: true, limit });
-      acceptances = await this.termsRecords([...index.values()]);
+      acceptances = [];
+      // `end` is exclusive, so the last key of one slice bounds the next.
+      let end: string | undefined;
+      for (let page = 0; page < TERMS_LIST_MAX_PAGES && acceptances.length < limit; page += 1) {
+        const index = await this.ctx.storage.list<string>({
+          prefix: TERMS_TIME_INDEX_PREFIX,
+          reverse: true,
+          limit,
+          ...(end !== undefined ? { end } : {}),
+        });
+        if (index.size === 0) break;
+        const keys = [...index.keys()];
+        end = keys[keys.length - 1]!;
+        let rows = await this.termsRecords([...index.values()]);
+        if (debug !== undefined) rows = rows.filter((row) => row.debug === debug);
+        acceptances.push(...rows);
+        // A short slice is the end of the index; no point asking again.
+        if (index.size < limit) break;
+      }
     }
     if (debug !== undefined) {
       acceptances = acceptances.filter((row) => row.debug === debug);

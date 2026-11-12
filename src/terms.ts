@@ -44,6 +44,10 @@ export const TERMS_RATE_LIMIT_PER_DAY = 200;
  * client retries a 429 at its next launch, so a day over the ceiling delays
  * records rather than losing them. */
 export const TERMS_GLOBAL_LIMIT_PER_DAY = 20_000;
+/** How many `limit`-sized slices of the time index the unfiltered operator
+ * read will walk while a `?debug=` filter is thinning them, so the read stays
+ * bounded (at most 5 x limit index entries) however the rows are mixed. */
+export const TERMS_LIST_MAX_PAGES = 5;
 /** Highest revision number we will believe. The app counts up from 1. */
 export const MAX_TERMS_VERSION = 10_000;
 /** Clamp for the short free-form facts (app version). */
@@ -189,9 +193,13 @@ export function termsGlobalKey(nowMs: number): string {
   return `${TERMS_GLOBAL_PREFIX}${utcDay(nowMs)}`;
 }
 
-/** Fingerprint-index key: `terms-fp:<hash>:<rev>` → the record key. */
-export function termsFingerprintIndexKey(fingerprintHash: string, version: number): string {
-  return `${TERMS_FINGERPRINT_INDEX_PREFIX}${fingerprintHash}:${String(version).padStart(5, "0")}`;
+/** Fingerprint-index key: `terms-fp:<hash>:<rev>:<install>` → the record
+ * key. The install id is part of it because one machine carries several
+ * installs over its life (a reinstall or a defaults reset mints a new id):
+ * without it the second install's entry would overwrite the first's, and
+ * deleting either would take the other's index entry with it. */
+export function termsFingerprintIndexKey(fingerprintHash: string, version: number, installId: string): string {
+  return `${TERMS_FINGERPRINT_INDEX_PREFIX}${fingerprintHash}:${String(version).padStart(5, "0")}:${installId}`;
 }
 
 /** Time-index key: `terms-t:<received_at_ms>:<install>:<rev>` → the record
@@ -203,16 +211,22 @@ export function termsTimeIndexKey(receivedAtMs: number, installId: string, versi
 /** The record's two index keys, so writes and deletes derive them the same way. */
 export function termsIndexKeys(row: StoredTermsAcceptance): string[] {
   const keys = [termsTimeIndexKey(row.received_at_ms, row.install_id, row.terms_version)];
-  if (row.fingerprint_hash) keys.push(termsFingerprintIndexKey(row.fingerprint_hash, row.terms_version));
+  if (row.fingerprint_hash) {
+    keys.push(termsFingerprintIndexKey(row.fingerprint_hash, row.terms_version, row.install_id));
+  }
   return keys;
 }
 
 /** What the rate limiter hashes in place of the connecting address: its /24
  * (IPv4) or /48 (IPv6) prefix, or "unknown" when the header is missing or not
- * an address. The counter key carries an unsalted SHA-256 of this; a hash of
- * a full IPv4 address would be reversible by enumerating the 2^32 of them, so
- * the low bits are zeroed first. The bucket is coarser as a result (one NAT's
- * neighbours share it), which the generous per-day limit allows for. */
+ * an address. The counter key carries an unsalted SHA-256 of this, and an
+ * unsalted hash of so small a space is reversible by enumeration whether or
+ * not the low bits are zeroed (2^24 prefixes take seconds). What the zeroing
+ * buys is a bound on what a reversal yields: a network, never a host. The
+ * bucket is coarser as a result (one NAT's neighbours share it), which the
+ * generous per-day limit allows for. An IPv4-mapped IPv6 address
+ * (`::ffff:a.b.c.d`) is bucketed by its embedded /24 rather than lumping every
+ * such client into one /48. */
 export function ipPrefixForRateLimit(ip: string | null | undefined): string {
   const value = (ip ?? "").trim();
   if (value.length === 0) return "unknown";
@@ -226,6 +240,9 @@ export function ipPrefixForRateLimit(ip: string | null | undefined): string {
 
   const hextets = parseIPv6(value);
   if (!hextets) return "unknown";
+  if (hextets.slice(0, 5).every((h) => h === 0) && hextets[5] === 0xffff) {
+    return `${hextets[6]! >> 8}.${hextets[6]! & 0xff}.${hextets[7]! >> 8}.0/24`;
+  }
   return `${hextets.slice(0, 3).map((h) => h.toString(16)).join(":")}::/48`;
 }
 

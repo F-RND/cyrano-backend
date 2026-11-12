@@ -9,6 +9,7 @@ import {
   MIN_ACCEPTED_AT_MS,
   sanitizeTermsAcceptance,
   TERMS_GLOBAL_LIMIT_PER_DAY,
+  TERMS_LIST_MAX_PAGES,
   TERMS_RATE_LIMIT_PER_DAY,
   termsAcceptanceKey,
   termsDebugFilter,
@@ -153,7 +154,7 @@ describe("terms keys", () => {
   });
 
   it("builds index keys that sort as their numbers do", () => {
-    expect(termsFingerprintIndexKey(FINGERPRINT, 3)).toBe(`terms-fp:${FINGERPRINT}:00003`);
+    expect(termsFingerprintIndexKey(FINGERPRINT, 3, INSTALL)).toBe(`terms-fp:${FINGERPRINT}:00003:${INSTALL}`);
     expect(termsTimeIndexKey(NOW, INSTALL, 1)).toBe(`terms-t:0${NOW}:${INSTALL}:00001`);
     expect(termsTimeIndexKey(NOW + 1, INSTALL, 1) > termsTimeIndexKey(NOW, OTHER, 9)).toBe(true);
   });
@@ -178,7 +179,9 @@ describe("ipPrefixForRateLimit", () => {
     expect(ipPrefixForRateLimit("2001:DB8:1::9")).toBe("2001:db8:1::/48");
     expect(ipPrefixForRateLimit("2001:db8:2::9")).toBe("2001:db8:2::/48");
     expect(ipPrefixForRateLimit("::1")).toBe("0:0:0::/48");
-    expect(ipPrefixForRateLimit("::ffff:203.0.113.7")).toBe("0:0:0::/48");
+    // IPv4-mapped: bucket by the embedded /24, not one shared /48.
+    expect(ipPrefixForRateLimit("::ffff:203.0.113.7")).toBe("203.0.113.0/24");
+    expect(ipPrefixForRateLimit("::ffff:cb00:7107")).toBe("203.0.113.0/24");
     expect(ipPrefixForRateLimit("fe80::1%en0")).toBe("fe80:0:0::/48");
   });
 
@@ -352,7 +355,7 @@ describe("RegistryDO /_terms", () => {
 
     await registry.fetch(submit(body({ install_id: OTHER, platform: "macos", channel: "developer_id", fingerprint: FINGERPRINT })));
     const hash = await sha256Hex(FINGERPRINT);
-    expect(storage.map.get(termsFingerprintIndexKey(hash, 1))).toBe(termsAcceptanceKey(OTHER, 1));
+    expect(storage.map.get(termsFingerprintIndexKey(hash, 1, OTHER))).toBe(termsAcceptanceKey(OTHER, 1));
     expect(keysWithPrefix(storage, "terms-t:")).toHaveLength(2);
   });
 
@@ -542,6 +545,62 @@ describe("RegistryDO /_terms", () => {
       expect(lists).toEqual([{ prefix: `terms-fp:${hash}:` }]);
       expect((await registry.fetch(new Request("https://registry/_terms?fingerprint_hash=zz"))).status).toBe(400);
       expect((await read(registry, `?fingerprint_hash=${"b".repeat(64)}`)).acceptances).toEqual([]);
+    });
+
+    it("pages the time index past a run of debug rows, bounded", async () => {
+      const { registry, storage } = makeRegistry();
+      // Three production rows, then twelve debug rows on top of them.
+      const ids: string[] = [];
+      for (let i = 0; i < 15; i += 1) {
+        const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+        ids.push(id);
+        await registry.fetch(submit(body({ install_id: id, debug: i >= 3 })));
+        // Receipt times come from Date.now(); spread them so the order is fixed.
+        const row = storage.map.get(termsAcceptanceKey(id, 1)) as StoredTermsAcceptance;
+        const bumped = { ...row, received_at_ms: NOW + i * 1_000 };
+        storage.map.delete(termsTimeIndexKey(row.received_at_ms, id, 1));
+        storage.map.set(termsAcceptanceKey(id, 1), bumped);
+        storage.map.set(termsTimeIndexKey(bumped.received_at_ms, id, 1), termsAcceptanceKey(id, 1));
+      }
+      storage.calls.length = 0;
+      const prod = await read(registry, "?debug=false&limit=5");
+      expect(prod.acceptances.map((row) => row.install_id)).toEqual([ids[2], ids[1], ids[0]]);
+      const lists = storage.calls.filter((c) => c.op === "list").map((c) => c.args as ListOptions);
+      // Slices of `limit`, each bounded below by the previous slice's last
+      // key; three full slices, then an empty one says the index is done.
+      expect(lists).toHaveLength(4);
+      expect(lists[0]).toEqual({ prefix: "terms-t:", reverse: true, limit: 5 });
+      expect(lists[1]!.end).toBe(termsTimeIndexKey(NOW + 10_000, ids[10]!, 1));
+      expect(lists[2]!.end).toBe(termsTimeIndexKey(NOW + 5_000, ids[5]!, 1));
+      expect(lists[3]!.end).toBe(termsTimeIndexKey(NOW, ids[0]!, 1));
+
+      // Enough matches in the first slice: one list, no more.
+      storage.calls.length = 0;
+      const dbg = await read(registry, "?debug=true&limit=5");
+      expect(dbg.acceptances).toHaveLength(5);
+      expect(storage.calls.filter((c) => c.op === "list")).toHaveLength(1);
+
+      // The ceiling holds when nothing matches: TERMS_LIST_MAX_PAGES slices and out.
+      storage.calls.length = 0;
+      const none = await read(registry, "?debug=false&limit=2");
+      expect(none.acceptances.map((row) => row.install_id)).toEqual([]);
+      expect(storage.calls.filter((c) => c.op === "list")).toHaveLength(TERMS_LIST_MAX_PAGES);
+    });
+
+    it("keeps two installs on one machine apart in the fingerprint index", async () => {
+      const { registry, storage } = makeRegistry();
+      const mac = { platform: "macos", channel: "developer_id", fingerprint: FINGERPRINT };
+      await registry.fetch(submit(body({ ...mac })));
+      await registry.fetch(submit(body({ ...mac, install_id: OTHER })));
+      expect(keysWithPrefix(storage, "terms-fp:")).toHaveLength(2);
+      const hash = await sha256Hex(FINGERPRINT);
+      const both = await read(registry, `?fingerprint_hash=${hash}`);
+      expect(both.acceptances.map((row) => row.install_id).sort()).toEqual([INSTALL, OTHER].sort());
+
+      const response = await registry.fetch(new Request(`https://registry/_terms?install_id=${INSTALL}`, { method: "DELETE" }));
+      expect(await response.json()).toEqual({ ok: true, deleted: 1 });
+      expect(keysWithPrefix(storage, "terms-fp:")).toEqual([termsFingerprintIndexKey(hash, 1, OTHER)]);
+      expect((await read(registry, `?fingerprint_hash=${hash}`)).acceptances.map((row) => row.install_id)).toEqual([OTHER]);
     });
 
     it("narrows by debug", async () => {
