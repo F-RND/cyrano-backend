@@ -74,6 +74,7 @@ import {
   TERMS_RATE_LIMIT_PREFIX,
   TERMS_TIME_INDEX_PREFIX,
   termsAcceptanceKey,
+  termsBeforeCursor,
   termsDebugFilter,
   termsFingerprintFilter,
   termsFingerprintIndexKey,
@@ -2386,14 +2387,32 @@ export class RegistryDO implements DurableObject {
    *  TERMS_LIST_MAX_PAGES slices have been read, so a run of recent debug
    *  rows cannot hide the production ones behind it (or vice versa) without
    *  the scan ever becoming unbounded. `total` is the number of rows
-   *  returned, not a count of every record held. */
+   *  returned, not a count of every record held.
+   *
+   *  The unfiltered read pages: when it stops with more of the index possibly
+   *  left (the `limit` filled, or the page ceiling hit on a full slice), the
+   *  body carries `next_before`, the time-index key of the last row returned,
+   *  and the caller hands it back as `?before=` to continue from there. The
+   *  key is the exclusive `end` the handler already bounds each slice with,
+   *  so consecutive pages neither overlap nor skip whatever the filter did to
+   *  them; the union of the pages is exactly one bigger read. `next_before`
+   *  is absent once the index is exhausted. The cursor means nothing on the
+   *  install or fingerprint reads (they don't walk the time index), so one
+   *  sent with either filter is refused rather than quietly ignored. */
   private async listTermsAcceptances(url: URL): Promise<Response> {
     const installParam = url.searchParams.get("install_id");
     const fingerprintParam = url.searchParams.get("fingerprint_hash");
     const installId = termsInstallFilter(installParam);
     const fingerprintHash = termsFingerprintFilter(fingerprintParam);
     const debug = termsDebugFilter(url.searchParams.get("debug"));
-    if ((installParam && !installId) || (fingerprintParam && !fingerprintHash) || debug === null) {
+    const before = termsBeforeCursor(url.searchParams.get("before"));
+    if (
+      (installParam && !installId) ||
+      (fingerprintParam && !fingerprintHash) ||
+      debug === null ||
+      before === null ||
+      (before !== undefined && (installId || fingerprintHash))
+    ) {
       return Response.json({ error: "bad_request" }, { status: 400 });
     }
     const limitParam = Number(url.searchParams.get("limit"));
@@ -2413,8 +2432,12 @@ export class RegistryDO implements DurableObject {
       );
     } else {
       acceptances = [];
-      // `end` is exclusive, so the last key of one slice bounds the next.
-      let end: string | undefined;
+      // `end` is exclusive, so the last key of one slice bounds the next, and
+      // a caller's cursor (the last key of its previous page) bounds the first.
+      let end: string | undefined = before;
+      // Whether the last slice read was a full one. A short or empty slice is
+      // the end of the index; a full one may have more behind it.
+      let lastSliceFull = false;
       for (let page = 0; page < TERMS_LIST_MAX_PAGES && acceptances.length < limit; page += 1) {
         const index = await this.ctx.storage.list<string>({
           prefix: TERMS_TIME_INDEX_PREFIX,
@@ -2422,6 +2445,7 @@ export class RegistryDO implements DurableObject {
           limit,
           ...(end !== undefined ? { end } : {}),
         });
+        lastSliceFull = index.size >= limit;
         if (index.size === 0) break;
         const keys = [...index.keys()];
         end = keys[keys.length - 1]!;
@@ -2429,8 +2453,27 @@ export class RegistryDO implements DurableObject {
         if (debug !== undefined) rows = rows.filter((row) => row.debug === debug);
         acceptances.push(...rows);
         // A short slice is the end of the index; no point asking again.
-        if (index.size < limit) break;
+        if (!lastSliceFull) break;
       }
+      // More may remain when the index had rows past the last slice, or when
+      // this page collected more matches than it may return.
+      const more = lastSliceFull || acceptances.length > limit;
+      acceptances = acceptances.slice(0, limit);
+      const last = acceptances[acceptances.length - 1];
+      // The cursor is the returned row's own index key, not the slice's last
+      // key: anything between the two was read but not returned, and the next
+      // page must read it again. When a debug filter matched nothing in a
+      // whole page there is no returned row, and the slice's last key is the
+      // right bound (nothing before it went unreturned), so paging can go on.
+      let nextBefore: string | undefined;
+      if (more) {
+        nextBefore = last ? termsTimeIndexKey(last.received_at_ms, last.install_id, last.terms_version) : end;
+      }
+      return Response.json({
+        acceptances,
+        total: acceptances.length,
+        ...(nextBefore !== undefined ? { next_before: nextBefore } : {}),
+      });
     }
     if (debug !== undefined) {
       acceptances = acceptances.filter((row) => row.debug === debug);

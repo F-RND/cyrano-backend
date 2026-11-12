@@ -895,7 +895,8 @@ export default {
 
     // Terms of Use acceptances (operator-only): the server's copy of who
     // agreed to which revision, and when. `?install_id=` or
-    // `?fingerprint_hash=` narrows it, `?debug=` too; `?limit=` caps it.
+    // `?fingerprint_hash=` narrows it, `?debug=` too; `?limit=` caps it and
+    // `?before=` (the `next_before` of the previous page) continues it.
     // DELETE `?install_id=` erases one install's records (smoke tests, junk,
     // an erasure the operator has approved); nothing else ever removes one.
     if (

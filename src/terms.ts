@@ -293,6 +293,22 @@ export function termsFingerprintFilter(value: string | null): string | null {
   return SHA256_HEX_RE.test(trimmed) ? trimmed : null;
 }
 
+const TIME_INDEX_KEY_RE = new RegExp(
+  `^${TERMS_TIME_INDEX_PREFIX}[0-9]{14}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9]{5}$`,
+);
+
+/** The operator read's `?before=` paging cursor: the `terms-t:` index key of
+ * the last row a previous page returned, handed back as the exclusive upper
+ * bound of the next. Opaque to the caller; here it must be exactly a key the
+ * index could hold, so a stray value can't turn into a different list
+ * (a `prefix` list with an `end` outside the prefix is the whole prefix).
+ * undefined when absent, null when malformed. */
+export function termsBeforeCursor(value: string | null): string | null | undefined {
+  if (value === null) return undefined;
+  const trimmed = value.trim();
+  return TIME_INDEX_KEY_RE.test(trimmed) ? trimmed : null;
+}
+
 /** The operator read's `?debug=` filter: true/false, undefined when absent,
  * null when malformed. */
 export function termsDebugFilter(value: string | null): boolean | null | undefined {

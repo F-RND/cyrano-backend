@@ -12,6 +12,7 @@ import {
   TERMS_LIST_MAX_PAGES,
   TERMS_RATE_LIMIT_PER_DAY,
   termsAcceptanceKey,
+  termsBeforeCursor,
   termsDebugFilter,
   termsFingerprintIndexKey,
   termsGlobalKey,
@@ -164,6 +165,19 @@ describe("terms keys", () => {
     expect(termsDebugFilter("true")).toBe(true);
     expect(termsDebugFilter("FALSE")).toBe(false);
     expect(termsDebugFilter("yes")).toBeNull();
+  });
+
+  it("accepts a paging cursor only when it is exactly a time-index key", () => {
+    const key = termsTimeIndexKey(NOW, INSTALL, 1);
+    expect(termsBeforeCursor(null)).toBeUndefined();
+    expect(termsBeforeCursor(key)).toBe(key);
+    expect(termsBeforeCursor(` ${key} `)).toBe(key);
+    expect(termsBeforeCursor("")).toBeNull();
+    expect(termsBeforeCursor(String(NOW))).toBeNull();
+    expect(termsBeforeCursor(termsAcceptanceKey(INSTALL, 1))).toBeNull();
+    expect(termsBeforeCursor(`${key}x`)).toBeNull();
+    expect(termsBeforeCursor(`terms-t:${NOW}:${INSTALL}:00001`)).toBeNull();
+    expect(termsBeforeCursor(key.toUpperCase())).toBeNull();
   });
 });
 
@@ -327,10 +341,54 @@ function keysWithPrefix(storage: FakeStorage, prefix: string): string[] {
   return [...storage.map.keys()].filter((key) => key.startsWith(prefix));
 }
 
-async function read(registry: RegistryDO, query = ""): Promise<{ acceptances: StoredTermsAcceptance[]; total: number }> {
+interface TermsListBody {
+  acceptances: StoredTermsAcceptance[];
+  total: number;
+  next_before?: string;
+}
+
+async function read(registry: RegistryDO, query = ""): Promise<TermsListBody> {
   const response = await registry.fetch(new Request(`https://registry/_terms${query}`));
   expect(response.status).toBe(200);
-  return (await response.json()) as { acceptances: StoredTermsAcceptance[]; total: number };
+  return (await response.json()) as TermsListBody;
+}
+
+/** Submits `count` acceptances with receipt times NOW, NOW+1s, ... so the
+ * newest-first order is fixed; `isDebug(i)` marks some as Xcode builds.
+ * Returns the install ids in submission (oldest-first) order. */
+async function seedRows(
+  registry: RegistryDO,
+  storage: FakeStorage,
+  count: number,
+  isDebug: (i: number) => boolean = () => false,
+): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+    ids.push(id);
+    await registry.fetch(submit(body({ install_id: id, debug: isDebug(i) }), `203.0.${i % 200}.1`));
+    const row = storage.map.get(termsAcceptanceKey(id, 1)) as StoredTermsAcceptance;
+    const bumped = { ...row, received_at_ms: NOW + i * 1_000 };
+    storage.map.delete(termsTimeIndexKey(row.received_at_ms, id, 1));
+    storage.map.set(termsAcceptanceKey(id, 1), bumped);
+    storage.map.set(termsTimeIndexKey(bumped.received_at_ms, id, 1), termsAcceptanceKey(id, 1));
+  }
+  storage.calls.length = 0;
+  return ids;
+}
+
+/** Follows `next_before` from the first page to the last, as the export does. */
+async function readAllPages(registry: RegistryDO, query: string): Promise<{ pages: TermsListBody[]; rows: StoredTermsAcceptance[] }> {
+  const pages: TermsListBody[] = [];
+  let before: string | undefined;
+  for (;;) {
+    const page = await read(registry, before ? `${query}&before=${encodeURIComponent(before)}` : query);
+    pages.push(page);
+    if (page.next_before === undefined) break;
+    before = page.next_before;
+    expect(pages.length).toBeLessThan(100);
+  }
+  return { pages, rows: pages.flatMap((p) => p.acceptances) };
 }
 
 describe("RegistryDO /_terms", () => {
@@ -587,6 +645,99 @@ describe("RegistryDO /_terms", () => {
       expect(storage.calls.filter((c) => c.op === "list")).toHaveLength(TERMS_LIST_MAX_PAGES);
     });
 
+    it("pages with before/next_before to exactly what one bigger read returns", async () => {
+      const { registry, storage } = makeRegistry();
+      const ids = await seedRows(registry, storage, 23);
+      const whole = await read(registry, "?limit=1000");
+      expect(whole.acceptances).toHaveLength(23);
+      expect(whole.next_before).toBeUndefined();
+
+      const { pages, rows } = await readAllPages(registry, "?limit=5");
+      // 23 = 5 + 5 + 5 + 5 + 3: four full pages with a cursor, a short last one without.
+      expect(pages.map((p) => p.acceptances.length)).toEqual([5, 5, 5, 5, 3]);
+      expect(pages.slice(0, 4).every((p) => typeof p.next_before === "string")).toBe(true);
+      expect(pages[4]!.next_before).toBeUndefined();
+      // Each cursor is the index key of the last row on its page.
+      for (const page of pages.slice(0, 4)) {
+        const last = page.acceptances[page.acceptances.length - 1]!;
+        expect(page.next_before).toBe(termsTimeIndexKey(last.received_at_ms, last.install_id, last.terms_version));
+      }
+      expect(rows).toEqual(whole.acceptances);
+      expect(rows.map((r) => r.install_id)).toEqual([...ids].reverse());
+      expect(new Set(rows.map((r) => r.install_id)).size).toBe(23);
+
+      // The cursor is the exclusive `end` of the first slice of the next page.
+      storage.calls.length = 0;
+      await read(registry, `?limit=5&before=${pages[0]!.next_before}`);
+      expect(storage.calls[0]).toEqual({
+        op: "list",
+        args: { prefix: "terms-t:", reverse: true, limit: 5, end: pages[0]!.next_before },
+      });
+    });
+
+    it("offers a cursor when the limit fills on a full slice, and none once the index is exhausted", async () => {
+      const { registry, storage } = makeRegistry();
+      await seedRows(registry, storage, 10);
+      // Exactly `limit` rows left: the slice is full, so the server cannot
+      // know the index is done and says there may be more; the next page is
+      // empty and final.
+      const exact = await read(registry, "?limit=10");
+      expect(exact.acceptances).toHaveLength(10);
+      expect(typeof exact.next_before).toBe("string");
+      const tail = await read(registry, `?limit=10&before=${exact.next_before}`);
+      expect(tail).toEqual({ acceptances: [], total: 0 });
+
+      const roomy = await read(registry, "?limit=11");
+      expect(roomy.acceptances).toHaveLength(10);
+      expect(roomy.next_before).toBeUndefined();
+    });
+
+    it("refuses a malformed cursor, or one on a read that does not page", async () => {
+      const { registry, storage } = makeRegistry();
+      await seedRows(registry, storage, 3);
+      const key = termsTimeIndexKey(NOW + 1_000, INSTALL, 1);
+      for (const query of [
+        "?before=",
+        `?before=${NOW}`,
+        `?before=${termsAcceptanceKey(INSTALL, 1)}`,
+        `?before=${key}x`,
+        "?before=terms-t:",
+        `?before=${key}&install_id=${INSTALL}`,
+        `?before=${key}&fingerprint_hash=${FINGERPRINT}`,
+      ]) {
+        const response = await registry.fetch(new Request(`https://registry/_terms${query}`));
+        expect(response.status, query).toBe(400);
+        expect(await response.json()).toEqual({ error: "bad_request" });
+      }
+      // A well-formed cursor pointing at nothing is just an empty, final page.
+      const beyond = await read(registry, `?before=${termsTimeIndexKey(NOW - 1, INSTALL, 1)}`);
+      expect(beyond).toEqual({ acceptances: [], total: 0 });
+    });
+
+    it("pages through a debug filter without gaps or repeats, even across empty pages", async () => {
+      const { registry, storage } = makeRegistry();
+      // Three production rows under twelve debug rows, as in the test above.
+      const ids = await seedRows(registry, storage, 15, (i) => i >= 3);
+      const whole = await read(registry, "?debug=false&limit=1000");
+      expect(whole.acceptances.map((r) => r.install_id)).toEqual([ids[2], ids[1], ids[0]]);
+
+      // limit=2: five slices of two cover the debug run (ids 14..5) and match
+      // nothing, so the page is empty but not final; its cursor is the last
+      // key read, and the production rows are still ahead.
+      const { pages, rows } = await readAllPages(registry, "?debug=false&limit=2");
+      expect(pages.map((p) => p.acceptances.map((r) => r.install_id))).toEqual([[], [ids[2], ids[1]], [ids[0]]]);
+      expect(pages[0]!.next_before).toBe(termsTimeIndexKey(NOW + 5_000, ids[5]!, 1));
+      expect(pages[1]!.next_before).toBe(termsTimeIndexKey(NOW + 1_000, ids[1]!, 1));
+      expect(pages[2]!.next_before).toBeUndefined();
+      expect(rows).toEqual(whole.acceptances);
+
+      // A page whose filter drops rows past the limit cuts at the last row
+      // returned, and the dropped-then-cut rows come back on the next page.
+      const dbg = await readAllPages(registry, "?debug=true&limit=5");
+      expect(dbg.pages.map((p) => p.acceptances.length)).toEqual([5, 5, 2]);
+      expect(dbg.rows.map((r) => r.install_id)).toEqual(ids.slice(3).reverse());
+    });
+
     it("keeps two installs on one machine apart in the fingerprint index", async () => {
       const { registry, storage } = makeRegistry();
       const mac = { platform: "macos", channel: "developer_id", fingerprint: FINGERPRINT };
@@ -700,6 +851,19 @@ describe("Worker /terms routes", () => {
     expect(asOperator.status).toBe(200);
     expect(forwarded.map((r) => `${r.method} ${new URL(r.url).pathname}${new URL(r.url).search}`)).toEqual([
       `${method} /_terms?install_id=${INSTALL}`,
+    ]);
+  });
+
+  it("passes the paging query through to the registry untouched", async () => {
+    const { env, forwarded } = makeWorkerEnv();
+    const search = `?limit=5&debug=false&before=${termsTimeIndexKey(NOW, INSTALL, 1)}`;
+    const response = await worker.fetch(
+      new Request(`https://worker.example/terms-acceptances${search}`, { headers: { authorization: "Bearer op" } }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(forwarded.map((r) => `${r.method} ${new URL(r.url).pathname}${new URL(r.url).search}`)).toEqual([
+      `GET /_terms${search}`,
     ]);
   });
 });
