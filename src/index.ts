@@ -50,6 +50,7 @@ export { AccountInboxDO } from "./account-inbox-do.js";
 // because both the existing call sites below and account-inbox.test.ts import
 // it from this module.
 import { inboxKeyFor } from "./inbox-key.js";
+import { MAX_TERMS_BODY_BYTES } from "./terms.js";
 export { inboxKeyFor };
 
 /** How long a presence stamp keeps
@@ -290,8 +291,14 @@ export default {
     // Terms of Use acceptance (backend/src/terms.ts). Token-less like
     // /bug-report: the apps' first-open gate comes before any plan or
     // credential, and a record grants nothing. Shape clamps live in terms.ts;
-    // the per-IP daily cap lives in the registry.
+    // the daily caps live in the registry. A declared body over the cap is
+    // refused here, before it costs a trip to the single registry object;
+    // the registry still measures what actually arrives.
     if (request.method === "POST" && url.pathname === "/terms/accept") {
+      const declared = Number(request.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > MAX_TERMS_BODY_BYTES) {
+        return Response.json({ error: "too_large" }, { status: 413 });
+      }
       const registry = env.REGISTRY_DO.get(env.REGISTRY_DO.idFromName("registry"));
       return registry.fetch(new Request("https://registry/_terms", request));
     }
@@ -888,13 +895,18 @@ export default {
 
     // Terms of Use acceptances (operator-only): the server's copy of who
     // agreed to which revision, and when. `?install_id=` or
-    // `?fingerprint_hash=` narrows it; `?limit=` caps it.
-    if (request.method === "GET" && url.pathname === "/terms-acceptances") {
+    // `?fingerprint_hash=` narrows it, `?debug=` too; `?limit=` caps it.
+    // DELETE `?install_id=` erases one install's records (smoke tests, junk,
+    // an erasure the operator has approved); nothing else ever removes one.
+    if (
+      (request.method === "GET" || request.method === "DELETE") &&
+      url.pathname === "/terms-acceptances"
+    ) {
       if (identity.kind !== "operator") {
         return new Response("forbidden", { status: 403 });
       }
       const registry = env.REGISTRY_DO.get(env.REGISTRY_DO.idFromName("registry"));
-      return registry.fetch(`https://registry/_terms${url.search}`);
+      return registry.fetch(`https://registry/_terms${url.search}`, { method: request.method });
     }
 
     // Release adoption (operator-only, backend/src/adoption.ts): how many

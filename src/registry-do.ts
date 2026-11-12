@@ -62,15 +62,25 @@ import {
   type SessionCostRow,
 } from "./session-cost.js";
 import {
+  ipPrefixForRateLimit,
   MAX_TERMS_BODY_BYTES,
   sanitizeTermsAcceptance,
+  TERMS_FINGERPRINT_INDEX_PREFIX,
+  TERMS_GLOBAL_LIMIT_PER_DAY,
+  TERMS_GLOBAL_PREFIX,
   TERMS_PREFIX,
   TERMS_RATE_LIMIT_PER_DAY,
   TERMS_RATE_LIMIT_PREFIX,
+  TERMS_TIME_INDEX_PREFIX,
   termsAcceptanceKey,
+  termsDebugFilter,
   termsFingerprintFilter,
+  termsFingerprintIndexKey,
+  termsGlobalKey,
+  termsIndexKeys,
   termsInstallFilter,
   termsRateLimitKey,
+  termsTimeIndexKey,
   type StoredTermsAcceptance,
 } from "./terms.js";
 import type { Env } from "./env.js";
@@ -387,7 +397,8 @@ export class RegistryDO implements DurableObject {
       // Internal routes below own their DELETEs — without this carve-out the
       // agent-key catch-all would treat their path as a key label.
       !url.pathname.startsWith("/_bugreport") &&
-      !url.pathname.startsWith("/_chatgpt")
+      !url.pathname.startsWith("/_chatgpt") &&
+      !url.pathname.startsWith("/_terms")
     ) {
       const label = decodeURIComponent(url.pathname.replace(/^\//, ""));
       return this.revokeAgentKey(request, label);
@@ -527,6 +538,9 @@ export class RegistryDO implements DurableObject {
     }
     if (request.method === "GET" && url.pathname === "/_terms") {
       return this.listTermsAcceptances(url);
+    }
+    if (request.method === "DELETE" && url.pathname === "/_terms") {
+      return this.deleteTermsAcceptances(url);
     }
 
     return new Response("not found", { status: 404 });
@@ -2279,31 +2293,17 @@ export class RegistryDO implements DurableObject {
       return Response.json({ error: "bad_request" }, { status: 400 });
     }
 
-    // First acceptance of a revision stands: its date starts the arbitration
-    // opt-out window. A retry (the app re-sends until it sees a 2xx) is
-    // acknowledged without touching the record or the rate-limit counter.
+    // Everything hashed up front: Web Crypto is external async work and must
+    // not sit inside the transaction (the rule appStoreLink follows). The
+    // client is the hashed network prefix (terms.ts explains why not the
+    // address), and it lives only in today's counter, never on the record.
+    const clientHash = (await sha256Hex(ipPrefixForRateLimit(request.headers.get("CF-Connecting-IP")))).slice(0, 16);
+    // Same derivation as the trial key (`trial:<sha256(fingerprint)>`).
+    const fingerprintHash = acceptance.fingerprint ? await sha256Hex(acceptance.fingerprint) : null;
+
     const key = termsAcceptanceKey(acceptance.install_id, acceptance.terms_version);
-    if (await this.ctx.storage.get(key)) {
-      return Response.json({ ok: true, recorded: false });
-    }
-
-    // Per-client daily cap, IP hashed into today's bucket only (bug-report
-    // scheme): the stored record never carries the address.
-    const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-    const clientHash = (await sha256Hex(ip)).slice(0, 16);
     const rlKey = termsRateLimitKey(clientHash, now);
-    const count = (await this.ctx.storage.get<number>(rlKey)) ?? 0;
-    if (count >= TERMS_RATE_LIMIT_PER_DAY) {
-      return Response.json({ error: "rate_limited" }, { status: 429 });
-    }
-    await this.ctx.storage.put(rlKey, count + 1);
-    const todayPrefix = termsRateLimitKey("", now);
-    const buckets = await this.ctx.storage.list({ prefix: TERMS_RATE_LIMIT_PREFIX });
-    const stale = [...buckets.keys()].filter((bucket) => !bucket.startsWith(todayPrefix));
-    for (let i = 0; i < stale.length; i += 128) {
-      await this.ctx.storage.delete(stale.slice(i, i + 128));
-    }
-
+    const globalKey = termsGlobalKey(now);
     const stored: StoredTermsAcceptance = {
       install_id: acceptance.install_id,
       terms_version: acceptance.terms_version,
@@ -2313,36 +2313,129 @@ export class RegistryDO implements DurableObject {
       channel: acceptance.channel,
       app_version: acceptance.app_version,
       debug: acceptance.debug,
-      // Same derivation as the trial key (`trial:<sha256(fingerprint)>`).
-      fingerprint_hash: acceptance.fingerprint ? await sha256Hex(acceptance.fingerprint) : null,
+      fingerprint_hash: fingerprintHash,
     };
-    await this.ctx.storage.put(key, stored);
-    return Response.json({ ok: true, recorded: true });
+
+    // First acceptance of a revision stands: its date starts the arbitration
+    // opt-out window. The existence check, both counters and the writes share
+    // one transaction so two identical requests in flight together (the app
+    // retries until it sees a 2xx) cannot both pass the check and the second
+    // overwrite the first's date. A repeat is acknowledged without touching
+    // the record or either counter.
+    const outcome = await this.ctx.storage.transaction(async (txn) => {
+      if (await txn.get(key)) return "duplicate" as const;
+      const count = (await txn.get<number>(rlKey)) ?? 0;
+      if (count >= TERMS_RATE_LIMIT_PER_DAY) return "rate_limited" as const;
+      const total = (await txn.get<number>(globalKey)) ?? 0;
+      if (total >= TERMS_GLOBAL_LIMIT_PER_DAY) return "rate_limited" as const;
+      const entries: Record<string, unknown> = {
+        [key]: stored,
+        [rlKey]: count + 1,
+        [globalKey]: total + 1,
+        [termsTimeIndexKey(now, stored.install_id, stored.terms_version)]: key,
+      };
+      if (fingerprintHash) {
+        entries[termsFingerprintIndexKey(fingerprintHash, stored.terms_version)] = key;
+      }
+      await txn.put(entries);
+      return "recorded" as const;
+    });
+
+    if (outcome === "rate_limited") {
+      return Response.json({ error: "rate_limited" }, { status: 429 });
+    }
+    if (outcome === "recorded") {
+      // Opportunistic prune of yesterday's counters, bounded per call: the
+      // keys are day-first, so everything stale is the range below today's
+      // prefix, and one list of at most 128 never scans the live buckets.
+      await this.pruneTermsCounters(TERMS_RATE_LIMIT_PREFIX, termsRateLimitKey("", now));
+      await this.pruneTermsCounters(TERMS_GLOBAL_PREFIX, globalKey);
+    }
+    return Response.json({ ok: true, recorded: outcome === "recorded" });
   }
 
-  /** Operator read. `?install_id=` lists one install's acceptances;
-   *  `?fingerprint_hash=` finds a Developer ID Mac's (the hash its trial is
-   *  keyed by); neither lists up to `limit` records (default 200, max 1000). */
+  private async pruneTermsCounters(prefix: string, todayKey: string): Promise<void> {
+    const stale = await this.ctx.storage.list({ start: prefix, end: todayKey, limit: 128 });
+    if (stale.size > 0) await this.ctx.storage.delete([...stale.keys()]);
+  }
+
+  /** Records by key, in the order given, skipping any that are gone (an index
+   * entry can outlive its record only between a delete's two steps, which
+   * are one transaction, so this is belt and braces). get() takes at most 128
+   * keys per call. */
+  private async termsRecords(keys: string[]): Promise<StoredTermsAcceptance[]> {
+    const rows: StoredTermsAcceptance[] = [];
+    for (let i = 0; i < keys.length; i += 128) {
+      const slice = keys.slice(i, i + 128);
+      const found = await this.ctx.storage.get<StoredTermsAcceptance>(slice);
+      for (const key of slice) {
+        const row = found.get(key);
+        if (row) rows.push(row);
+      }
+    }
+    return rows;
+  }
+
+  /** Operator read. `?install_id=` lists one install's acceptances (a prefix
+   *  list on its records); `?fingerprint_hash=` finds a Developer ID Mac's
+   *  through the `terms-fp:` index; neither walks the `terms-t:` index
+   *  newest-first, up to `limit` (default 200, max 1000), never the whole
+   *  store. `?debug=true|false` narrows any of them. `total` is the number of
+   *  rows returned, not a count of every record held. */
   private async listTermsAcceptances(url: URL): Promise<Response> {
     const installParam = url.searchParams.get("install_id");
     const fingerprintParam = url.searchParams.get("fingerprint_hash");
     const installId = termsInstallFilter(installParam);
     const fingerprintHash = termsFingerprintFilter(fingerprintParam);
-    if ((installParam && !installId) || (fingerprintParam && !fingerprintHash)) {
+    const debug = termsDebugFilter(url.searchParams.get("debug"));
+    if ((installParam && !installId) || (fingerprintParam && !fingerprintHash) || debug === null) {
       return Response.json({ error: "bad_request" }, { status: 400 });
     }
     const limitParam = Number(url.searchParams.get("limit"));
     const limit =
       Number.isFinite(limitParam) && limitParam > 0 ? Math.min(Math.floor(limitParam), 1000) : 200;
 
-    const prefix = installId ? `${TERMS_PREFIX}${installId}:` : TERMS_PREFIX;
-    const rows = await this.ctx.storage.list<StoredTermsAcceptance>({ prefix });
-    let acceptances = [...rows.values()];
-    if (fingerprintHash) {
-      acceptances = acceptances.filter((row) => row.fingerprint_hash === fingerprintHash);
+    let acceptances: StoredTermsAcceptance[];
+    if (installId) {
+      const rows = await this.ctx.storage.list<StoredTermsAcceptance>({ prefix: `${TERMS_PREFIX}${installId}:` });
+      acceptances = [...rows.values()].sort((a, b) => b.received_at_ms - a.received_at_ms);
+    } else if (fingerprintHash) {
+      const index = await this.ctx.storage.list<string>({
+        prefix: `${TERMS_FINGERPRINT_INDEX_PREFIX}${fingerprintHash}:`,
+      });
+      acceptances = (await this.termsRecords([...index.values()])).sort(
+        (a, b) => b.received_at_ms - a.received_at_ms,
+      );
+    } else {
+      const index = await this.ctx.storage.list<string>({ prefix: TERMS_TIME_INDEX_PREFIX, reverse: true, limit });
+      acceptances = await this.termsRecords([...index.values()]);
     }
-    acceptances.sort((a, b) => b.received_at_ms - a.received_at_ms);
-    return Response.json({ acceptances: acceptances.slice(0, limit), total: acceptances.length });
+    if (debug !== undefined) {
+      acceptances = acceptances.filter((row) => row.debug === debug);
+    }
+    acceptances = acceptances.slice(0, limit);
+    return Response.json({ acceptances, total: acceptances.length });
+  }
+
+  /** Operator erasure of one install: its records and their index entries go
+   *  together, in one transaction, so an index never points at nothing. For
+   *  smoke-test rows, junk, and erasure requests the operator has approved. */
+  private async deleteTermsAcceptances(url: URL): Promise<Response> {
+    const installId = termsInstallFilter(url.searchParams.get("install_id"));
+    if (!installId) {
+      return Response.json({ error: "bad_request" }, { status: 400 });
+    }
+    const deleted = await this.ctx.storage.transaction(async (txn) => {
+      const rows = await txn.list<StoredTermsAcceptance>({ prefix: `${TERMS_PREFIX}${installId}:` });
+      const keys = [...rows.keys()];
+      for (const row of rows.values()) keys.push(...termsIndexKeys(row));
+      // delete() takes at most 128 keys per call.
+      for (let i = 0; i < keys.length; i += 128) {
+        await txn.delete(keys.slice(i, i + 128));
+      }
+      return rows.size;
+    });
+    return Response.json({ ok: true, deleted });
   }
 
   private async deleteBugReport(id: string): Promise<Response> {
